@@ -24,6 +24,7 @@ typedef struct ExtractionProperties {
 	float Ratio_U;//upper threshold for ratio of width to height of detected regions
 	int Area_max;//maximum area size of regions
 	int Area_min;//minimum area size of regions
+	int MatchingFactor;//ROIs are detected as the same if (new-old) < (new / MatchingFactor) <higher values=more duplicates>
 	int Mode;//training or prediction
 }ExtractionProperties;
 
@@ -40,8 +41,8 @@ public:
 
 int main(int argc, char** argv) {
 	//function declarations
-	void getFileNames(vector<string>filenames, string directory, string extension);
-	double ExtractROIs(pair<Mat, int> inputImage, list<pair<Mat, int>> ROIs, ExtractionProperties props);
+	void getFileNames(vector<string> & filenames, string directory, string extension);
+	double ExtractROIs(pair<Mat, int> inputImage, list<pair<Mat, int>> & ROIs, ExtractionProperties props);
 	double ExtractFeatures(list<pair<Mat, int>> ROIs, Mat & outputFeatures);
 	void setLayerSizes(string input, int firstLayer, int LastLayer, vector<int> & output);
 	void createTrainingResponse(list<pair<Mat, int>> inputROIs, int numClasses, Mat & responses_1D, Mat & responses_2D);
@@ -55,16 +56,17 @@ int main(int argc, char** argv) {
 		"{method|manual|manual means a user must verify each ROI passed, automatic passes all ROIs (less accurate)}"
 		"{layers|50|the number of internal layers for the ANN}"
 		"{classes|classes.txt|a text file listing all the class names}"
-		"{ROIdir|ROIs|a directory for all regions of interest during training to be extracted}"
+		"{ROIdir|ROIs|a directory for all regions of interest during for AUTO mode}"
 		;
 
 	CommandLineParser parser(argc, argv, keys);
 	
 	ExtractionProperties ExProps;
-	ExProps.Area_min = 30 * 30;
+	ExProps.Area_min = 20 * 20;
 	ExProps.Area_max = 0;//no max limit
-	ExProps.Ratio_L = 0.75;
-	ExProps.Ratio_U = 1.25;
+	ExProps.Ratio_L = 0.6f;
+	ExProps.Ratio_U = 1.4f;
+	ExProps.MatchingFactor = 20;
 
 	classes class_list;
 	string classfile=parser.get<string>("classes");
@@ -77,7 +79,8 @@ int main(int argc, char** argv) {
 	if (parser.has("train")) {
 		//set the training method
 		string method = parser.get<string>("method");
-		if (method.find("auto"))
+		size_t found = method.find("auto");
+		if (found != string::npos)
 			ExProps.Mode = PREDICT_AUTO;
 		else
 			ExProps.Mode = PREDICT_MAN;//defeault is Predict Manual
@@ -85,12 +88,13 @@ int main(int argc, char** argv) {
 		//load the images in given directory
 		string imagePath = parser.get<string>("imagepath");
 		vector<string>imageNames;
-		getFileNames(imageNames, imagePath, "jpg");
+		string extension = "png";
+		getFileNames(imageNames, imagePath, extension);
 		vector<pair<Mat,int>> trainingImages;//Mat and the class it is
 		Mat temp;
 		int imageClass;
 		for (vector<string>::iterator it = imageNames.begin();it != imageNames.end();it++) {
-			temp = imread(imagePath + "/" + (*it) + ".jpg", IMREAD_GRAYSCALE);
+			temp = imread(imagePath + "/" + (*it), IMREAD_COLOR);
 			class_list.convert(*it, imageClass);
 			trainingImages.push_back(make_pair(temp,imageClass));
 		}
@@ -104,17 +108,19 @@ int main(int argc, char** argv) {
 		//ask user about each ROI
 		if (ExProps.Mode == PREDICT_MAN) {
 			cout << "for each of the following images, please enter (y/n) appropriately, y=a sign(that we want), n=not a sign (or not one we want)";
-			namedWindow("confirmation Window");
+			namedWindow("Confirmation Window");
 			list<pair<Mat,int>>::iterator it = ROIs.begin();
-			
+			list<pair<Mat, int>>::iterator temp;
 			while (it != ROIs.end()) {
-				int key;
+				int key = 0;
 				do {
-					imshow("confirmation Window", (*it).first);
+					imshow("Confirmation Window", (*it).first);
 					key = waitKey(0);
-				} while (key != 'y' || key != 'n');
+				} while (!((key == 'y') || (key == 'n')));
 				if (key == 'n') {
-					ROIs.erase(it);
+					temp = it;
+					it++;
+					ROIs.erase(temp);
 				}
 				else
 					it++;
@@ -189,11 +195,11 @@ void setLayerSizes(string input, int firstLayer, int LastLayer, vector<int> & ou
 	output.push_back(LastLayer);//insert the output layer
 }
 
-double ExtractROIs(pair<Mat,int> inputImage, list<pair<Mat,int>> ROIs, ExtractionProperties props) {
+double ExtractROIs(pair<Mat,int> inputImage, list<pair<Mat,int>> & ROIs, ExtractionProperties props) {
 	int64 start = getTickCount();
-	double mserExtractor(pair<Mat, int> inputImage, list<pair<Mat, int>> outputImages, ExtractionProperties props);
+	double mserExtractor(pair<Mat, int> inputImage, list<pair<Mat, int>> & outputImages, ExtractionProperties props);
 	//threshold the image
-	threshold(inputImage.first, inputImage.first, props.Threshold_L, 255, ThresholdTypes::THRESH_TOZERO);//perhaps try an adaptive thresholding rule too later
+	//threshold(inputImage.first, inputImage.first, props.Threshold_L, 255, ThresholdTypes::THRESH_TOZERO);//perhaps try an adaptive thresholding rule too later
 
 	//extract ROIs using MSER
 	mserExtractor(inputImage, ROIs, props);
@@ -218,9 +224,9 @@ double ExtractFeatures(list<pair<Mat,int>> ROIs, Mat & outputFeatures) {//input 
 	return (getTickCount() - start) / getTickFrequency();
 }
 
-double mserExtractor(pair<Mat,int> inputImage, list<pair<Mat,int>> outputImages, ExtractionProperties props) {
+double mserExtractor(pair<Mat,int> inputImage, list<pair<Mat,int>> & outputImages, ExtractionProperties props) {
 	int64 start = getTickCount();
-	bool FilterMserResults(Rect & RectangleUnderTesting, Rect * Previous, float ratio_max, float ratio_min);
+	bool FilterMserResults(Rect RectangleUnderTesting, Rect & Previous, ExtractionProperties props);
 	//set up the MSERextractor
 	Ptr<MSER> mserExtractor = MSER::create();
 	if (props.Area_min != 0)
@@ -230,31 +236,41 @@ double mserExtractor(pair<Mat,int> inputImage, list<pair<Mat,int>> outputImages,
 	vector<vector<Point>> dummyVector;
 	vector<Rect>Rectangles;
 	mserExtractor->detectRegions(inputImage.first, dummyVector, Rectangles);
-
 	//filter the results of the MSER extractor
-	Rect * Previous = &Rect(0, 0, 0, 0);//initialize a null rect
+	Rect Previous = Rect(0, 0, 0, 0);//initialize a null rect
 	for (vector<Rect>::iterator it = Rectangles.begin();it != Rectangles.end();it++) {
-		if (FilterMserResults(*it, Previous, props.Ratio_U, props.Ratio_L))
+		if (FilterMserResults(*it, Previous, props))
 			outputImages.push_back(make_pair(inputImage.first(Range((*it).y, (*it).y + (*it).height), Range((*it).x, (*it).x + (*it).width)),inputImage.second));
 	}
 	return (getTickCount() - start) / getTickFrequency();
 }
 
-bool FilterMserResults(Rect & RectangleUnderTesting, Rect * Previous, float ratio_max, float ratio_min) {
+bool FilterMserResults(Rect RectangleUnderTesting, Rect & Previous, ExtractionProperties props) {
 	float ratio = (float)RectangleUnderTesting.height / (float)RectangleUnderTesting.width;
 	//if image is not the right proportion return false
-	if (ratio > ratio_max)
+	if (ratio > props.Ratio_U)
 		return false;
-	if (ratio < ratio_min)
+	if (ratio < props.Ratio_L)
 		return false;
 	//if the image is the same as the last image return false
-	if (RectangleUnderTesting.width == (*Previous).width &&
-		RectangleUnderTesting.height == (*Previous).height &&
-		RectangleUnderTesting.x == (*Previous).x &&
-		RectangleUnderTesting.y == (*Previous).y)
+	int duplicitiyCount = 0;
+	//test left side
+	if ((RectangleUnderTesting.x - (Previous).x) < RectangleUnderTesting.x / props.MatchingFactor)
+		duplicitiyCount++;
+	//test top side
+	if ((RectangleUnderTesting.y - (Previous).y) < RectangleUnderTesting.y / props.MatchingFactor)
+		duplicitiyCount++;
+	//test right side
+	if (((RectangleUnderTesting.width + RectangleUnderTesting.x) - ((Previous).width + (Previous).x)) < RectangleUnderTesting.width / props.MatchingFactor)
+		duplicitiyCount++;
+	//test bottom side
+	if (((RectangleUnderTesting.height + RectangleUnderTesting.y) - ((Previous).height + (Previous).y)) < RectangleUnderTesting.height / props.MatchingFactor)
+		duplicitiyCount++;
+	
+	if (duplicitiyCount > 1) {//if there are 2 sides that are the same consider it a duplicate
 		return false;
-	//else image is unique and correct, set previous image=image, and return true
-	Previous = &RectangleUnderTesting;
+	}
+	Previous = RectangleUnderTesting;
 	return true;
 }
 
@@ -280,7 +296,7 @@ double hogExtractor(const Mat& input_image, Mat & outputRow) {
 	return (getTickCount() - start) / getTickFrequency();
 }
 
-void getFileNames(vector<string>filenames, string directory, string extension) {
+void getFileNames(vector<string> & filenames, string directory, string extension) {
 		std::string search_path = directory + "/*." + extension;
 		WIN32_FIND_DATA fd;
 		HANDLE hFind = ::FindFirstFile(search_path.c_str(), &fd);
@@ -318,15 +334,17 @@ bool classes::convert(string from_name,int & to_number) {
 	to_number = -1;// -1 indicates no match, is changed to something if a match is found
 	if (class_list.empty())
 		return false;
-	static pair<string, int> last_member = class_list.at(1);
+	static pair<string, int> last_member = class_list.front();
 
-	if (last_member.first.find(from_name)) {//check if the string is the same as the last request
+	size_t found = from_name.find(last_member.first);
+	if (found != string::npos) {//check if the string is the same as the last request
 		to_number = last_member.second;
 		return true;
 	}
 	else//else search the entire class collection
 		for (vector<pair<string, int>>::iterator it = class_list.begin();it != class_list.end();it++) {
-			if ((*it).first.find(from_name)) {
+			found = from_name.find((*it).first);
+			if (found != string::npos) {
 				to_number = (*it).second;
 				last_member = (*it);
 				return true;
