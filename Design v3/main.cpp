@@ -25,8 +25,14 @@ typedef struct ExtractionProperties {
 	int Area_max;//maximum area size of regions
 	int Area_min;//minimum area size of regions
 	int MatchingFactor;//ROIs are detected as the same if (new-old) < (new / MatchingFactor) <higher values=more duplicates>
-	int Mode;//training or prediction
+	int Mode;///needs to be moved into program flags
 }ExtractionProperties;
+
+typedef struct ProgramFlags {
+	int Mode;//training or prediction
+	int TMode;//training mode
+	bool Debug;//debug mode
+} ProgramFlags;
 
 class classes {
 private:
@@ -39,6 +45,21 @@ public:
 	int size();
 };
 
+class TrainingAnswers {
+private:
+	vector<bool> answers;
+	string filename;
+	bool answersPreexist;
+public:
+	TrainingAnswers() {};
+	~TrainingAnswers();
+	bool initialize(string directory);
+	bool getAnswer(int index);
+	void pushAnswer(bool answer);
+	void writeOut();
+	bool answersExist();
+};
+
 int main(int argc, char** argv) {
 	//function declarations
 	void getFileNames(vector<string> & filenames, string directory, string extension);
@@ -46,7 +67,7 @@ int main(int argc, char** argv) {
 	double ExtractFeatures(list<pair<Mat, int>> ROIs, Mat & outputFeatures);
 	void setLayerSizes(string input, int firstLayer, int LastLayer, vector<int> & output);
 	void createTrainingResponse(list<pair<Mat, int>> inputROIs, int numClasses, Mat & responses_1D, Mat & responses_2D);
-	double trainNetwork(const Mat Tdata, const Mat Tresponses, string networkDir, vector<int> layerSizes);
+	double trainNetwork(const Mat Tdata, const Mat Tresponses, string networkDir, vector<int> layerSizes, bool update);
 
 	string keys =
 		"{train||set this to indicate training mode}"
@@ -57,6 +78,8 @@ int main(int argc, char** argv) {
 		"{layers|50|the number of internal layers for the ANN}"
 		"{classes|classes.txt|a text file listing all the class names}"
 		"{ROIdir|ROIs|a directory for all regions of interest during for AUTO mode}"
+		"{debug||enable debug mode, this will automate answering training questions}"
+		"{answers|answers.txt|training answers, only used in debug mode}"
 		;
 
 	CommandLineParser parser(argc, argv, keys);
@@ -67,6 +90,12 @@ int main(int argc, char** argv) {
 	ExProps.Ratio_L = 0.6f;
 	ExProps.Ratio_U = 1.4f;
 	ExProps.MatchingFactor = 20;
+	ExProps.Threshold_L = 127;
+	ExProps.Threshold_U = 200;
+
+	ProgramFlags ProgFlags;
+	ProgFlags.Debug = (parser.has("debug"));
+
 
 	classes class_list;
 	string classfile=parser.get<string>("classes");
@@ -107,23 +136,52 @@ int main(int argc, char** argv) {
 
 		//ask user about each ROI
 		if (ExProps.Mode == PREDICT_MAN) {
+
+			TrainingAnswers answers;
+			bool FilterManually = true;
+			if (ProgFlags.Debug) {
+				answers.initialize(parser.get<string>("answers"));
+				FilterManually = !answers.answersExist();//if answers did exist we do not need to manually filter
+			}
+
+			list<pair<Mat, int>>::iterator it = ROIs.begin();
+			list<pair<Mat, int>>::iterator temp;
+			if (!FilterManually) {//if we already have a filter set up, extract answers from the file
+				int i = 0;
+				while (it != ROIs.end()) {
+					if (answers.getAnswer(i++) == false) {
+						temp = it;
+						it++;
+						ROIs.erase(temp);
+					}
+					else 
+						it++;
+				}
+			}
+			else {//else manually answer each one if no file is set up or if not in debug
+			Mat BlankImage = Mat::zeros(Size(1, 1), CV_8UC3);
 			cout << "for each of the following images, please enter (y/n) appropriately, y=a sign(that we want), n=not a sign (or not one we want)";
 			namedWindow("Confirmation Window");
-			list<pair<Mat,int>>::iterator it = ROIs.begin();
-			list<pair<Mat, int>>::iterator temp;
-			while (it != ROIs.end()) {
-				int key = 0;
-				do {
-					imshow("Confirmation Window", (*it).first);
-					key = waitKey(0);
-				} while (!((key == 'y') || (key == 'n')));
-				if (key == 'n') {
-					temp = it;
-					it++;
-					ROIs.erase(temp);
+				while (it != ROIs.end()) {
+					int key = 0;
+					do {
+						imshow("Confirmation Window", BlankImage);
+						imshow("Confirmation Window", (*it).first);
+						key = waitKey(0);
+					} while (!((key == 'y') || (key == 'n')));
+					if (key == 'n') {
+						temp = it;
+						it++;
+						ROIs.erase(temp);
+						if (ProgFlags.Debug) answers.pushAnswer(false);
+					}
+					else {
+						if (ProgFlags.Debug) answers.pushAnswer(true);
+						it++;
+					}
 				}
-				else
-					it++;
+				destroyWindow("Confirmation Window");
+				if (ProgFlags.Debug) answers.writeOut();
 			}
 		}
 		/*else	
@@ -143,7 +201,7 @@ int main(int argc, char** argv) {
 		setLayerSizes(layerConfig, imageFeatures.cols, class_count, layerSizes);
 		
 		string networkpath = parser.get<string>("networkpath");
-		trainNetwork(imageFeatures, responses2D, networkpath, layerSizes);
+		trainNetwork(imageFeatures, responses2D, networkpath, layerSizes, false);
 	}
 
 }
@@ -153,14 +211,14 @@ inline TermCriteria TC(int iters, double eps)
 	return TermCriteria(TermCriteria::MAX_ITER + (eps > 0 ? TermCriteria::EPS : 0), iters, eps);
 }
 
-double trainNetwork(const Mat Tdata, const Mat Tresponses, string networkDir, vector<int> layerSizes) {
+double trainNetwork(const Mat Tdata, const Mat Tresponses, string networkDir, vector<int> layerSizes, bool update) {//update indicates network is updating, instead of creating
 	//this function creates or updates an ANN and returns time taken
 	int64 start = getTickCount();
 	TermCriteria TC(int, double);
 	Ptr<TrainData> TrainingData = TrainData::create(Tdata, ROW_SAMPLE, Tresponses);
 	Ptr<ANN_MLP> network = StatModel::load<ANN_MLP>(networkDir);
 	int flag;
-	if (!(network->isTrained())) {
+	if (!update) {
 		flag = 0;
 		network = ANN_MLP::create();
 		network->setLayerSizes(layerSizes);
@@ -198,9 +256,17 @@ void setLayerSizes(string input, int firstLayer, int LastLayer, vector<int> & ou
 double ExtractROIs(pair<Mat,int> inputImage, list<pair<Mat,int>> & ROIs, ExtractionProperties props) {
 	int64 start = getTickCount();
 	double mserExtractor(pair<Mat, int> inputImage, list<pair<Mat, int>> & outputImages, ExtractionProperties props);
-	//threshold the image
-	//threshold(inputImage.first, inputImage.first, props.Threshold_L, 255, ThresholdTypes::THRESH_TOZERO);//perhaps try an adaptive thresholding rule too later
+	Mat temp = inputImage.first;
+	//to one channel
+	cvtColor(temp, temp, CV_BGR2GRAY);
 
+	//threshold the image
+	threshold(temp, temp, props.Threshold_L, 255, ThresholdTypes::THRESH_TOZERO);//perhaps try an adaptive thresholding rule too later
+
+	//apply canny edge
+	//Canny(temp, temp, 127, 255);
+	 
+	inputImage.first = temp;
 	//extract ROIs using MSER
 	mserExtractor(inputImage, ROIs, props);
 
@@ -211,13 +277,13 @@ double ExtractFeatures(list<pair<Mat,int>> ROIs, Mat & outputFeatures) {//input 
 	int64 start = getTickCount();
 
 	outputFeatures = Mat(0, 0, CV_32F);
-	double hogExtractor(const Mat& input_image, Mat & outputRow);
+	double hogExtractor(const Mat input_image, Mat & outputRow);
 	//extract features using a HOG
 	Mat outputData, row;
 	int i = 0;
 	for (list<pair<Mat,int>>::iterator it = ROIs.begin();it != ROIs.end();it++) {
 		hogExtractor((*it).first, row);
-		outputData.row(i++) = row;
+		outputData.push_back(row);
 	}
 	outputFeatures = outputData;
 
@@ -243,6 +309,10 @@ double mserExtractor(pair<Mat,int> inputImage, list<pair<Mat,int>> & outputImage
 			outputImages.push_back(make_pair(inputImage.first(Range((*it).y, (*it).y + (*it).height), Range((*it).x, (*it).x + (*it).width)),inputImage.second));
 	}
 	return (getTickCount() - start) / getTickFrequency();
+}
+
+double HoughExtractor(pair<Mat, int>inputImage, list<pair<Mat, int>> & outputImages, ExtractionProperties props) {
+	return 0;
 }
 
 bool FilterMserResults(Rect RectangleUnderTesting, Rect & Previous, ExtractionProperties props) {
@@ -274,7 +344,7 @@ bool FilterMserResults(Rect RectangleUnderTesting, Rect & Previous, ExtractionPr
 	return true;
 }
 
-double hogExtractor(const Mat& input_image, Mat & outputRow) {
+double hogExtractor(const Mat input_image, Mat & outputRow) {
 	int64 start = getTickCount();
 	Mat resized_image;
 	vector<float> results;
@@ -379,4 +449,48 @@ bool classes::initialize(string directory) {//reads from a file and creates a li
 
 int classes::size() {
 	return (int)class_list.size();
+}
+
+bool TrainingAnswers::answersExist() {
+	return answersPreexist;
+}
+
+bool TrainingAnswers::initialize(string directory) {
+	filename = directory;
+	ifstream file(filename);
+	if (!file) {
+		answersPreexist = false;
+		return false;
+	}
+
+	string buf;
+	while (getline(file, buf)) {
+		if (buf[0] == '1')
+			answers.push_back(true);
+		else
+			answers.push_back(false);
+	}
+	answersPreexist = true;
+	return true;
+}
+
+bool TrainingAnswers::getAnswer(int index) {
+	return answers[index];
+}
+
+void TrainingAnswers::pushAnswer(bool answer) {
+	answers.push_back(answer);
+}
+
+void TrainingAnswers::writeOut() {
+	ofstream file(filename);
+	for (vector<bool>::iterator it = answers.begin();it != answers.end();it++) {
+		file << *it << endl;
+	}
+	file.close();
+}
+
+TrainingAnswers::~TrainingAnswers() {
+	if(!answersPreexist)
+		writeOut();
 }
