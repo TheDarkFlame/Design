@@ -23,12 +23,21 @@ typedef struct ExtractionProperties {
 	int Area_max;//maximum area size of regions
 	int Area_min;//minimum area size of regions
 	int MatchingFactor;//ROIs are detected as the same if (new-old) < (new / MatchingFactor) <higher values=more duplicates>
-}ExtractionProperties;
+} ExtractionProperties;
 
 typedef struct ProgramFlags {
 	bool Train;//true for training mode, false for prediction
 	bool Debug;//debug mode
+	bool preDetected;//ROIs are pre-detected (we do not detect them)
 } ProgramFlags;
+
+typedef struct metrics {
+	float FPrate;
+	float TPrate;
+	float Precision;
+	float Accuracy;
+	float Fscore;
+} metrics;
 
 class classes {
 private:
@@ -69,6 +78,8 @@ int main(int argc, char** argv) {
 	double trainNetwork(const Mat Tdata, const Mat Tresponses, string networkDir, vector<int> layerSizes, bool newNetwork);
 	void TrainingFilterROIs(list<pair<Mat, int>> & ROIs, ProgramFlags ProgFlags, string answerFileDirectory);
 	bool Predict(Mat data, Mat & responses1D, Mat & responses2D, string networkDir);
+	void createConfusionMatrix(Mat results_predicted, Mat results_actual, Mat & confusionMatrix, int matrixClassCount, int & totalEntries);
+	Mat generateROCgraph(vector<metrics> input);
 
 	//@
 	//extract all program options
@@ -82,6 +93,7 @@ int main(int argc, char** argv) {
 		"{classes|classes.txt|a text file listing all the class names}"
 		"{ROIdir|ROIs|a directory for all regions of interest during for AUTO mode}"
 		"{debug||enable debug mode, this will automate answering training questions}"
+		"{skipROI||skips region detection, uses the images as ROIs}"
 		"{answers|answers.txt|training answers, only used in debug mode}"
 		;
 
@@ -101,6 +113,7 @@ int main(int argc, char** argv) {
 	ProgramFlags ProgFlags;
 	ProgFlags.Debug = (parser.has("debug"));
 	ProgFlags.Train = (parser.has("train"));
+	ProgFlags.preDetected = (parser.has("skipROI"));
 
 	//initialize class list
 	classes class_list;
@@ -110,12 +123,6 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 	int class_count = class_list.size();
-
-	//set program flags
-	if (parser.has("train"))
-		ProgFlags.Train = true;
-	if (parser.has("debug"))
-		ProgFlags.Debug = true;
 
 	cout << "Program modes:" << endl << "training = " << ProgFlags.Train << endl << "debug = " << ProgFlags.Debug << endl << endl;
 	//@
@@ -149,17 +156,25 @@ int main(int argc, char** argv) {
 	}
 	cout << "read in " << trainingImages.size() << " images for evaluation" << endl;
 
-	//perform extraction of ROIs
 	list<pair<Mat, int>>ROIs;//ROIs and classes
-	cout << "ROI distribution as follows:" << endl << "<image> <ROIs in image>" << endl;
-	int lastSize = 0, counter = 0;
-	timeTaken = 0;
-	for (vector<pair<Mat, int>>::iterator it = trainingImages.begin();it != trainingImages.end();it++) {
-		timeTaken += ExtractROIs(*it, ROIs, ExProps);
-		cout << counter++ << " " << ROIs.size() - lastSize << endl;
-		lastSize = (int) ROIs.size();
+	if (ProgFlags.Debug && ProgFlags.preDetected) {//colour segment the ROIs like a normal ROI would be
+		void SegmentImage(Mat &image, int lower_threshold);
+		for (vector < pair < Mat, int >> ::iterator it = trainingImages.begin();it != trainingImages.end();it++) {
+			SegmentImage((*it).first, ExProps.Threshold_L);
+			ROIs.push_back(*it);
+		}
 	}
-	cout << "ROI extraction complete in " << timeTaken << " seconds" << endl << endl;
+	else {//else perform extraction of ROIs
+		cout << "ROI distribution as follows:" << endl << "<image> <ROIs in image>" << endl;
+		int lastSize = 0, counter = 0;
+		timeTaken = 0;
+		for (vector<pair<Mat, int>>::iterator it = trainingImages.begin();it != trainingImages.end();it++) {
+			timeTaken += ExtractROIs(*it, ROIs, ExProps);
+			cout << counter++ << " " << ROIs.size() - lastSize << endl;
+			lastSize = (int)ROIs.size();
+		}
+		cout << "ROI extraction complete in " << timeTaken << " seconds" << endl << endl;
+	}
 
 	//we now have all the features we want to analyze, perform extraction of features
 	cout << endl << "extracting features" << endl;
@@ -170,7 +185,8 @@ int main(int argc, char** argv) {
 	string networkpath = parser.get<string>("networkpath");
 	
 	if (ProgFlags.Train) {//if training mode, train the network
-		TrainingFilterROIs(ROIs, ProgFlags, parser.get<string>("answers"));//mark incorrect ROIs with class=-1
+		if (ProgFlags.preDetected == false)
+			TrainingFilterROIs(ROIs, ProgFlags, parser.get<string>("answers"));//mark incorrect ROIs with class=-1 (only if program is detecting ROIs)
 	
 		//obtain the output classes
 		Mat responses1D, responses2D;
@@ -186,8 +202,10 @@ int main(int argc, char** argv) {
 	}
 	else {//else if not training mode, predict using the network
 		Mat responses_MostLikelyClass, responses_ValuePerClass;
+		int64 Start = getTickCount();
 		if (!Predict(imageFeatures, responses_MostLikelyClass,responses_ValuePerClass, networkpath))
 			return -1;//if we cannot load the network return -1
+		cout << "prediction complete in : " << (getTickCount() - Start) / getTickFrequency() << " seconds" << endl;
 		list<pair<Mat, int>>::iterator ROIit = ROIs.begin();
 		for (int i = 0;i < responses_MostLikelyClass.rows;i++) {
 			int ImageNumber = (*(ROIit++)).second, classNumber;
@@ -199,6 +217,7 @@ int main(int argc, char** argv) {
 			}
 		}
 	}
+
 	system("pause");
 	return 0;
 }
@@ -265,19 +284,22 @@ void setLayerSizes(string input, int firstLayer, int LastLayer, vector<int> & ou
 	output.push_back(LastLayer);//insert the output layer
 }
 
-double ExtractROIs(pair<Mat,int> inputImage, list<pair<Mat,int>> & ROIs, ExtractionProperties props) {
-	int64 start = getTickCount();
-	double mserExtractor(pair<Mat, int> inputImage, list<pair<Mat, int>> & outputImages, ExtractionProperties props);
-	Mat temp = inputImage.first;
+void SegmentImage(Mat &image, int lower_threshold) {//segments image based on colour (basic segmentation= thresholding)
 	//to one channel
-	cvtColor(temp, temp, CV_BGR2GRAY);
+	cvtColor(image, image, CV_BGR2GRAY);
 
 	//threshold the image
-	threshold(temp, temp, props.Threshold_L, 255, ThresholdTypes::THRESH_TOZERO);//perhaps try an adaptive thresholding rule too later
+	threshold(image, image, lower_threshold, 255, ThresholdTypes::THRESH_TOZERO);//perhaps try an adaptive thresholding rule too later
+}
 
-	//apply canny edge
-	//Canny(temp, temp, 127, 255);
-	 
+double ExtractROIs(pair<Mat,int> inputImage, list<pair<Mat,int>> & ROIs, ExtractionProperties props) {
+	int64 start = getTickCount();
+	void SegmentImage(Mat &image, int lower_threshold);
+	double mserExtractor(pair<Mat, int> inputImage, list<pair<Mat, int>> & outputImages, ExtractionProperties props);
+	Mat temp = inputImage.first;
+	
+	SegmentImage(temp, props.Threshold_L);//spectral segmentation
+ 
 	inputImage.first = temp;
 	//extract ROIs using MSER
 	mserExtractor(inputImage, ROIs, props);
@@ -492,7 +514,7 @@ bool classes::convert(string from_name,int & to_number) {
 bool classes::convert(int from_number,string & to_name) {
 	to_name = "none";//default is no class, this is changed if a class is found
 
-	if (from_number = -1)//if -1, return true, class is none
+	if (from_number == -1)//if -1, return true, class is none
 		return true;
 	if (class_list.empty())//if empty, return false
 		return false;
@@ -566,4 +588,87 @@ int TrainingAnswers::size() {
 TrainingAnswers::~TrainingAnswers() {
 	if(!answersPreexist)
 		writeOut();
+}
+
+void createConfusionMatrix(Mat results_predicted, Mat results_actual, Mat & confusionMatrix, int matrixClassCount, int & totalEntries) {
+	Mat _confusionMatrix = Mat::zeros(matrixClassCount, matrixClassCount, CV_8U);//create an empty NxN matrix
+	totalEntries = 0;
+	int row, col;
+	//recall that format is Mat.<type>at(y,x) where in our case, each y is the result from a different image, and x is the result for each class
+	for (int i = 0;i < results_predicted.rows;i++) {//iterate through every result
+		row = (uchar)results_predicted.at<float>(i, 0);
+		col = (uchar)results_actual.at<float>(i, 0);
+		_confusionMatrix.at<uchar>(col, row)++;//for each result set, increment the correct element of the confusion matrix
+		totalEntries++;//increment the running total
+	}
+	confusionMatrix = _confusionMatrix;
+}
+
+void calculateMetrics(Mat results_predicted, Mat results_actual, vector<metrics> & data, int numClasses, Mat & confusionMatrix) {
+	//function&var declarations
+	void createConfusionMatrix(Mat results_predicted, Mat results_actual, Mat & confusionMatrix, int matrixClassCount, int & totalEntries);
+	int totalEntries;
+	metrics temp;
+	//vector<float>FPrate;
+	//vector<float>TPrate;
+	//vector<float>Precision;
+	//vector<float>Accuracy;
+	//vector<float>Fscore;
+
+	//body			
+	createConfusionMatrix(results_predicted, results_actual, confusionMatrix, numClasses, totalEntries);//get confusion matrix and total entries into it
+
+	for (int classSelect = 0;classSelect < numClasses;classSelect++) {//for each class
+
+																	  //calculate the totals (per class)
+																	  //--------------------------------
+																	  //note all the stuff below is easier to understand when drawing a 3x3 confusion matrix
+																	  //and labelling the areas of the matrix WRT a single class
+																	  //	TPrate = TP/P
+																	  //	FPrate = FP/N
+																	  //	Precision = TP/(TP+FP)
+																	  //	Fscore=Precision X TPrate
+																	  //	Accuracy=(TP+TN)/(P+N)
+		int actualClassTotal = 0, predictedClassTotal = 0;//per class this is the number of times the class *actually* occurs (instead of predicted occurs)
+		for (int j = 0;j < numClasses;j++) {
+			actualClassTotal += confusionMatrix.at<uchar>(j, classSelect);//sum of all entries on the same column -- A(i)
+			predictedClassTotal += confusionMatrix.at<uchar>(classSelect, j);//sum of all entries on the same row -- P(i)
+		}
+
+
+		//calculate TPrate aka Recall
+		//---------------------------
+		float P = (float)actualClassTotal;
+		float TP = (float)confusionMatrix.at<uchar>(classSelect, classSelect);
+		temp.TPrate = (TP / P);
+
+		//calculate FPrate
+		//----------------
+		float FP, N;
+		N = (float)(totalEntries - actualClassTotal);
+		FP = (float)(predictedClassTotal - confusionMatrix.at<uchar>(classSelect, classSelect));
+		temp.FPrate = (FP / N);
+
+		//calculate Accuracy,Precision,F-Score
+		//------------------------------------
+		float TN = totalEntries - FP - P;
+		temp.Accuracy = ((TP + TN) / (P + N));
+		temp.Precision = (TP / (TP + FP));
+		temp.Fscore = (temp.Precision * temp.TPrate);
+
+		//push into vector
+		data.push_back(temp);
+
+	}//end for each class
+}
+
+Mat generateROCgraph(vector<metrics> input) {
+	Mat graph(100, 100, CV_8UC1);
+	for (vector<metrics>::iterator it = input.begin();it != input.end();it++) {
+		int x = (int)(*it).FPrate * 100;
+		int y = (int)(*it).TPrate * 100;
+		Point plotPoint(x, y);
+		circle(graph, plotPoint, 2, 0, -1);
+	}
+	return graph;
 }
