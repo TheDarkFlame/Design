@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
 	bool Predict(Mat data, Mat & responses1D, Mat & responses2D, string networkDir);
 	void createConfusionMatrix(Mat results_predicted, Mat results_actual, Mat & confusionMatrix, int matrixClassCount, int & totalEntries);
 	Mat generateROCgraph(vector<metrics> input);
-
+	void SegmentImage(Mat &inputImage, list<Mat> &outputImages, int lower_threshold);
 	//@
 	//extract all program options
 	//@
@@ -128,7 +128,6 @@ int main(int argc, char** argv) {
 	//@
 	//begin the program
 	//@
-
 	double timeTaken;
 
 	//load the images in given directory
@@ -158,10 +157,12 @@ int main(int argc, char** argv) {
 
 	list<pair<Mat, int>>ROIs;//ROIs and classes
 	if (ProgFlags.Debug && ProgFlags.preDetected) {//colour segment the ROIs like a normal ROI would be
-		void SegmentImage(Mat &image, int lower_threshold);
 		for (vector < pair < Mat, int >> ::iterator it = trainingImages.begin();it != trainingImages.end();it++) {
-			SegmentImage((*it).first, ExProps.Threshold_L);
-			ROIs.push_back(*it);
+			list<Mat>outputSegments;
+			SegmentImage((*it).first, outputSegments, ExProps.Threshold_L);
+			for (list<Mat>::iterator it2 = outputSegments.begin();it2 != outputSegments.end();it2++) {
+				ROIs.push_back(make_pair(*it2, (*it).second));
+			}
 		}
 	}
 	else {//else perform extraction of ROIs
@@ -284,25 +285,32 @@ void setLayerSizes(string input, int firstLayer, int LastLayer, vector<int> & ou
 	output.push_back(LastLayer);//insert the output layer
 }
 
-void SegmentImage(Mat &image, int lower_threshold) {//segments image based on colour (basic segmentation= thresholding)
+void SegmentImage(Mat &inputImage, list<Mat> &outputImages, int lower_threshold) {//segments image based on colour (basic segmentation= thresholding)
 	//to one channel
-	cvtColor(image, image, CV_BGR2GRAY);
+	void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30, int whiteThreshold = 30);
+	Mat temp;
+	cvtColor(inputImage, temp, CV_BGR2GRAY);
 
 	//threshold the image
-	threshold(image, image, lower_threshold, 255, ThresholdTypes::THRESH_TOZERO);//perhaps try an adaptive thresholding rule too later
+	threshold(temp, temp, lower_threshold, 255, ThresholdTypes::THRESH_TOZERO);//perhaps try an adaptive thresholding rule too later
+	outputImages.push_back(temp);
+	//HSV segment
+	HSVsegment(inputImage, temp);
+	outputImages.push_back(temp);	
 }
 
 double ExtractROIs(pair<Mat,int> inputImage, list<pair<Mat,int>> & ROIs, ExtractionProperties props) {
 	int64 start = getTickCount();
-	void SegmentImage(Mat &image, int lower_threshold);
+	void SegmentImage(Mat &inputImage, list<Mat> &outputImages, int lower_threshold);
 	double mserExtractor(pair<Mat, int> inputImage, list<pair<Mat, int>> & outputImages, ExtractionProperties props);
-	Mat temp = inputImage.first;
+	list<Mat> segmentedImages;
+	SegmentImage(inputImage.first, segmentedImages, props.Threshold_L);//spectral segmentation
 	
-	SegmentImage(temp, props.Threshold_L);//spectral segmentation
- 
-	inputImage.first = temp;
 	//extract ROIs using MSER
-	mserExtractor(inputImage, ROIs, props);
+	for (list<Mat>::iterator it = segmentedImages.begin();it != segmentedImages.end();it++) {
+		Mat debug = *it;
+		mserExtractor(make_pair(*it, inputImage.second), ROIs, props);
+	}
 
 	return (getTickCount() - start) / getTickFrequency();
 }
@@ -387,6 +395,10 @@ double mserExtractor(pair<Mat,int> inputImage, list<pair<Mat,int>> & outputImage
 	vector<vector<Point>> dummyVector;
 	vector<Rect>Rectangles;
 	mserExtractor->detectRegions(inputImage.first, dummyVector, Rectangles);
+	
+	if ((inputImage.first).channels() == 3)
+		cvtColor(inputImage.first, inputImage.first, CV_BGR2GRAY);//make everything grayscale
+
 	//filter the results of the MSER extractor
 	Rect Previous = Rect(0, 0, 0, 0);//initialize a null rect
 	for (vector<Rect>::iterator it = Rectangles.begin();it != Rectangles.end();it++) {
@@ -671,4 +683,33 @@ Mat generateROCgraph(vector<metrics> input) {
 		circle(graph, plotPoint, 2, 0, -1);
 	}
 	return graph;
+}
+
+void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30, int whiteThreshold = 30) {
+	static int prevSegmentSize = 0;
+	static Mat lut(1, 256, CV_8UC3);
+	if (prevSegmentSize != segmentSize) {
+		for (int i = 0;i < 256;i++) {
+				int extraHue = i % segmentSize;
+
+				if (i + segmentSize - extraHue >= 180)
+					lut.at<Vec3b>(i)[0] = 0;//H channel
+				else if (extraHue < segmentSize / 2)
+					lut.at<Vec3b>(i)[0] = i - extraHue;//H channel
+				else
+					lut.at<Vec3b>(i)[0] = i - extraHue + segmentSize;//H channel
+				
+				if (i < whiteThreshold)
+					lut.at<Vec3b>(i)[1] = 0;//S channel
+				else
+					lut.at<Vec3b>(i)[1] = i;//S channel
+
+				lut.at<Vec3b>(i)[2] = 127;//V channel
+		}
+		prevSegmentSize = segmentSize;
+	}
+
+	cvtColor(inputImage, outputImage, CV_BGR2HSV);
+	LUT(outputImage, lut, outputImage);
+	cvtColor(outputImage, outputImage, CV_HSV2BGR);
 }
