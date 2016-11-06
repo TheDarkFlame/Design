@@ -86,7 +86,10 @@ int main(int argc, char** argv) {
 	void setLayerSizes(string input, int firstLayer, int LastLayer, vector<int> & output);
 	double trainNetwork(const Mat Tdata, const Mat Tresponses, string networkDir, vector<int> layerSizes, bool newNetwork);
 	bool Predict(Mat data, Mat & responses1D, Mat & responses2D, string networkDir);
-
+	void createConfusionMatrix(Mat results_predicted, Mat results_actual, Mat & confusionMatrix, int matrixClassCount, int & totalEntries);
+	void calculateMetrics(vector<metrics> & data, Mat confusionMatrix, int totalEntries);
+	Mat generateROCgraph(vector<metrics> input);
+	Mat createResponseMat(vector<imagetuple> responses, int classCount, int imageCount);
 
 	//@
 	//extract all program options
@@ -239,8 +242,11 @@ int main(int argc, char** argv) {
 		}
 
 		cout << "prediction complete in : " << (getTickCount() - Start) / getTickFrequency() << " seconds" << endl;
-		
-		vector < pair<int, vector<int>>> results;//int=associated image number, vector<int>=classes identified
+
+		Mat results_actual = createResponseMat(images, class_list.size(), (int)images.size());
+		Mat results_predicted = createResponseMat(responses, class_list.size(), (int)images.size());
+
+		/*vector < pair<int, vector<int>>> results;//int=associated image number, vector<int>=classes identified
 		//iterate through each ROI
 		for (int i = 0;i < responses.size();i++) {
 			
@@ -266,6 +272,13 @@ int main(int argc, char** argv) {
 			}
 			cout << endl;
 		}
+		*/
+		vector<metrics> performanceMetrics;//gives performance metrics per class
+		Mat confusionMatrix;
+		int totalEntries;
+		createConfusionMatrix(results_predicted, results_actual, confusionMatrix, class_list.size(), totalEntries);
+		calculateMetrics(performanceMetrics, confusionMatrix, totalEntries);
+		generateROCgraph(performanceMetrics);
 	}
 
 	system("pause");
@@ -646,6 +659,35 @@ TrainingAnswers::~TrainingAnswers() {
 		writeOut();
 }
 
+void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30, int whiteThreshold = 30) {
+	static int prevSegmentSize = 0;
+	static Mat lut(1, 256, CV_8UC3);
+	if (prevSegmentSize != segmentSize) {
+		for (int i = 0;i < 256;i++) {
+			int extraHue = i % segmentSize;
+
+			if (i + segmentSize - extraHue >= 180)
+				lut.at<Vec3b>(i)[0] = 0;//H channel
+			else if (extraHue < segmentSize / 2)
+				lut.at<Vec3b>(i)[0] = i - extraHue;//H channel
+			else
+				lut.at<Vec3b>(i)[0] = i - extraHue + segmentSize;//H channel
+
+			if (i < whiteThreshold)
+				lut.at<Vec3b>(i)[1] = 0;//S channel
+			else
+				lut.at<Vec3b>(i)[1] = i;//S channel
+
+			lut.at<Vec3b>(i)[2] = 127;//V channel
+		}
+		prevSegmentSize = segmentSize;
+	}
+
+	cvtColor(inputImage, outputImage, CV_BGR2HSV);
+	LUT(outputImage, lut, outputImage);
+	cvtColor(outputImage, outputImage, CV_HSV2BGR);
+}
+
 void createConfusionMatrix(Mat results_predicted, Mat results_actual, Mat & confusionMatrix, int matrixClassCount, int & totalEntries) {
 	Mat _confusionMatrix = Mat::zeros(matrixClassCount, matrixClassCount, CV_8U);//create an empty NxN matrix
 	totalEntries = 0;
@@ -660,20 +702,16 @@ void createConfusionMatrix(Mat results_predicted, Mat results_actual, Mat & conf
 	confusionMatrix = _confusionMatrix;
 }
 
-void calculateMetrics(Mat results_predicted, Mat results_actual, vector<metrics> & data, int numClasses, Mat & confusionMatrix) {
+void calculateMetrics(vector<metrics> & data, Mat confusionMatrix, int totalEntries) {
 	//function&var declarations
-	void createConfusionMatrix(Mat results_predicted, Mat results_actual, Mat & confusionMatrix, int matrixClassCount, int & totalEntries);
-	int totalEntries;
+	
+	int numClasses = confusionMatrix.cols;
 	metrics temp;
 	//vector<float>FPrate;
 	//vector<float>TPrate;
 	//vector<float>Precision;
 	//vector<float>Accuracy;
 	//vector<float>Fscore;
-
-	//body			
-	createConfusionMatrix(results_predicted, results_actual, confusionMatrix, numClasses, totalEntries);//get confusion matrix and total entries into it
-
 	for (int classSelect = 0;classSelect < numClasses;classSelect++) {//for each class
 
 																	  //calculate the totals (per class)
@@ -729,31 +767,24 @@ Mat generateROCgraph(vector<metrics> input) {
 	return graph;
 }
 
-void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30, int whiteThreshold = 30) {
-	static int prevSegmentSize = 0;
-	static Mat lut(1, 256, CV_8UC3);
-	if (prevSegmentSize != segmentSize) {
-		for (int i = 0;i < 256;i++) {
-			int extraHue = i % segmentSize;
-
-			if (i + segmentSize - extraHue >= 180)
-				lut.at<Vec3b>(i)[0] = 0;//H channel
-			else if (extraHue < segmentSize / 2)
-				lut.at<Vec3b>(i)[0] = i - extraHue;//H channel
-			else
-				lut.at<Vec3b>(i)[0] = i - extraHue + segmentSize;//H channel
-
-			if (i < whiteThreshold)
-				lut.at<Vec3b>(i)[1] = 0;//S channel
-			else
-				lut.at<Vec3b>(i)[1] = i;//S channel
-
-			lut.at<Vec3b>(i)[2] = 127;//V channel
-		}
-		prevSegmentSize = segmentSize;
+Mat createResponseMat(vector<imagetuple> responses, int classCount, int imageCount) {
+	Mat output(imageCount, classCount, CV_32F);
+	vector<bool> rowTracker;//tracks the number of non-"none" entries per a row(image)
+	for (int i = 0; i < imageCount;i++) {
+		rowTracker.push_back(false);
 	}
 
-	cvtColor(inputImage, outputImage, CV_BGR2HSV);
-	LUT(outputImage, lut, outputImage);
-	cvtColor(outputImage, outputImage, CV_HSV2BGR);
+	for (int i = 0;i < responses.size();i++) {//for each ROI
+		//int classNumber = get<3>(responses[i])	(col)
+		//int imageNumber = get<2>(responses[i])	(row)
+		if (get<3>(responses[i]) != 0) {//if not a "none" class
+			output.at<float>(get<2>(responses[i]), get<3>(responses[i])) = 1.f;//rows=image cols=response
+			vector<bool>::iterator it = rowTracker.begin() + i;
+		}
+	}
+	for (int i = 0;i < rowTracker.size();i++) {
+		if (rowTracker[i])
+			output.at<float>(i, 0) = 1.f;
+	}
+	return output;
 }
