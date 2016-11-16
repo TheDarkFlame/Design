@@ -21,11 +21,11 @@ using namespace cv::ml;
 typedef struct ExtractionProperties {
 	int Threshold_L;//lower threshold (anything below becomes black)
 	int Threshold_U;//upper threshold (currently not implemented)
-	float Ratio_L;//lower threshold for ratio of width to height of detected regions
-	float Ratio_U;//upper threshold for ratio of width to height of detected regions
+	double Ratio_L;//lower threshold for ratio of width to height of detected regions
+	double Ratio_U;//upper threshold for ratio of width to height of detected regions
 	int Area_max;//maximum area size of regions
 	int Area_min;//minimum area size of regions
-	int MatchingFactor;//ROIs are detected as the same if (new-old) < (new / MatchingFactor) <higher values=more duplicates>
+	int MatchingPercent;//this is percentage of width that the ROIs edges must match by to be considered duplicates
 } ExtractionProperties;
 
 typedef struct ProgramFlags {
@@ -78,8 +78,7 @@ int main(int argc, char** argv) {
 	//function declarations
 	//@
 	void getFileNames(vector<string> & filenames, string directory, list<string> extension);
-	void SegmentImage(Mat &inputImage, vector<Mat> &outputImages, int lower_threshold);
-	double ExtractROIs(Mat inputImage, vector<Rect> & ROIs, ExtractionProperties props);
+	double ExtractROIs(Mat inputImage, vector<Rect> & ROIs, ExtractionProperties & props);
 	void TrainingFilterROIs(vector<imagetuple> images, vector<recttuple> & rectROIs, classes class_list, ProgramFlags ProgFlags, string answerFileDirectory);
 	double ExtractFeatures(Mat ROI, Mat & outputRow);
 	void createTrainingResponse(vector<imagetuple> inputROIs, int numClasses, Mat & responses_1D, Mat & responses_2D);
@@ -95,28 +94,44 @@ int main(int argc, char** argv) {
 	//extract all program options
 	//@
 	string keys =
-		"{train||set this to indicate training mode}"
 		"{networkpath|network.xml|the network save location}"
 		"{imagepath|./images|default image directory}"
-		"{train||set this if you want to do training}"
+		"{train||include this if you want to do training}"
 		"{layers|50|the number of internal layers for the ANN}"
 		"{classes|classes.txt|a text file listing all the class names}"
-		"{ROIdir|ROIs|a directory for all regions of interest during for AUTO mode}"
 		"{debug||enable debug mode, this will automate answering training questions}"
 		"{skipROI||skips region detection, uses the images as ROIs}"
 		"{answers|answers.txt|training answers, only used in debug mode}"
+		"{h,help||help}"
 		;
-
+	string help =
+		"enter arguments as follows: -<arg name>=<arg val>\n"
+		"enter flags as follows: -<flag name>\n"
+		"arguments list: <argument name> : <argument description> : <default>\n"
+		"imagepath : the directory from where images will be read : ./images\n"
+		"layers : hidden layer configuration for neural network, for use in training mode : 50\n"
+		"classes : path to the classes file that contains a list of all classes for use : classes.txt\n"
+		"answers : the path to an answers file for ROI questions (debug mode only) : answers.txt\n"
+		"flags list: <flag name> : <flag description>\n"
+		"train : puts the system into training mode, else it will behave in prediction mode\n"
+		"skipROI : uses images as ROIs, skipping ROI detection (debug mode only)\n"
+		"debug : puts system into debug mode\n"
+		;
 	CommandLineParser parser(argc, argv, keys);
+	
+	if (argc == 1) {
+		cout << "you have not entered any arguments" << endl << "displaying help and using argument defaults" << endl;
+		cout << help;
+	}
 
 	//initialize extraction properties
 	ExtractionProperties ExProps;
 	ExProps.Area_min = 20 * 20;
 	ExProps.Area_max = 0;//no max limit
-	ExProps.Ratio_L = 0.6f;
-	ExProps.Ratio_U = 1.4f;
-	ExProps.MatchingFactor = 20;
-	ExProps.Threshold_L = 127;
+	ExProps.Ratio_L = 0.8;
+	ExProps.Ratio_U = 1.25;
+	ExProps.MatchingPercent = 25;
+	ExProps.Threshold_L = 70;
 	ExProps.Threshold_U = 200;
 
 	//initialize program flags
@@ -130,14 +145,17 @@ int main(int argc, char** argv) {
 	string classfile = parser.get<string>("classes");
 	if (!class_list.initialize(classfile)) {
 		cout << "failed to initialize classes, please ensure that a valid class file " + classfile + " exists";
-		return 1;
+		system("pause");
 	}
 	int class_count = class_list.size();
 
-	cout << "Program modes:" << endl << "training = " << ProgFlags.Train << endl << "debug = " << ProgFlags.Debug << endl << endl;
+	cout << "Program modes:" << endl << "training = " << (ProgFlags.Train ? "true" : "false")
+		<< endl << "debug = " << (ProgFlags.Debug ? "true" : "false")
+		<< endl << "skip ROI detection = " << (ProgFlags.preDetected ? "true" : "false") << endl << endl;
 	//@
 	//begin the program
 	//@
+	double tick = getTickCount();
 	double timeTaken;
 
 	//load the images
@@ -163,11 +181,9 @@ int main(int argc, char** argv) {
 	vector<imagetuple>ROIs;//ROIs
 	if (ProgFlags.Debug && ProgFlags.preDetected) {//colour segment the ROIs like a normal ROI would be
 		for (vector<imagetuple> ::iterator it = images.begin();it != images.end();it++) {
-
-			vector<Mat>outputSegments;
-			SegmentImage(get<0>(*it), outputSegments, ExProps.Threshold_L);
-			for (vector<Mat>::iterator it2 = outputSegments.begin();it2 != outputSegments.end();it2++)
-				ROIs.push_back(make_tuple(*it2, get<1>(*it), get<2>(*it), get<3>(*it)));
+			Mat temp;
+			cvtColor(get<0>(*it), temp, CV_BGR2GRAY);//push back every image as a grayscale
+			ROIs.push_back(make_tuple(temp, get<1>(*it), get<2>(*it), get<3>(*it)));
 		}
 	}
 	else {//else perform extraction of ROIs
@@ -192,7 +208,8 @@ int main(int argc, char** argv) {
 			int baseImageNumber = get<1>(*it_rect);
 			Rect baseRectangle = get<0>(*it_rect);
 
-			Mat region_entire = get<0>(images[baseImageNumber]);
+			Mat region_entire;
+			cvtColor(get<0>(images[baseImageNumber]), region_entire, CV_BGR2GRAY);//check this line in other areas
 			Mat region_rect = region_entire(
 				Range(baseRectangle.y, baseRectangle.y + baseRectangle.height),
 				Range(baseRectangle.x, baseRectangle.x + baseRectangle.width));
@@ -210,7 +227,7 @@ int main(int argc, char** argv) {
 		timeTaken += ExtractFeatures(get<0>(*it_img), row);
 		imageFeatures.push_back(row);
 	}
-	cout << "descriptor extraction complete in " << timeTaken << " seconds" << endl << endl;
+	cout << "descriptor extraction for " << ROIs.size() << " ROIs complete in " << timeTaken << " seconds" << endl << endl;
 
 	//learning algorithms
 	string networkpath = parser.get<string>("networkpath");
@@ -224,7 +241,7 @@ int main(int argc, char** argv) {
 		string layerConfig = parser.get<string>("layers");
 		vector<int>layerSizes;
 		setLayerSizes(layerConfig, imageFeatures.cols, class_count, layerSizes);
-		cout << "begining training" << endl;
+		cout << "beginning training" << endl;
 		timeTaken = trainNetwork(imageFeatures, responses2D, networkpath, layerSizes, true);
 		cout << "training complete in " << timeTaken << " seconds" << endl;
 	}
@@ -246,40 +263,22 @@ int main(int argc, char** argv) {
 		Mat results_actual = createResponseMat(images, class_list.size(), (int)images.size());
 		Mat results_predicted = createResponseMat(responses, class_list.size(), (int)images.size());
 
-		/*vector < pair<int, vector<int>>> results;//int=associated image number, vector<int>=classes identified
-		//iterate through each ROI
-		for (int i = 0;i < responses.size();i++) {
-			
-			set<int> detectedClasses;
-			//consider all ROIs with the same base image together
-			for (int j = get<2>(responses[i]);i < responses.size() && get<2>(responses[i]) == j;i++)
-				if (get<3>(responses[i]) != 0)
-					detectedClasses.insert(get<3>(responses[i]));//push back all detected classes
-			if (detectedClasses.size() == 0)
-				detectedClasses.insert(0);//if no other classes are detected, insert "none"
-
-			results.push_back(make_pair(
-				get<2>(responses[i - 1]),
-				vector<int>(detectedClasses.begin(), detectedClasses.end())));
+		cout << endl << "classifications for each ROI, in format as follows:";
+		cout << endl << "<base imagename> <classification>" << endl;
+		for (vector<imagetuple>::iterator it = responses.begin();it != responses.end();it++) {
+			string prediction;
+			class_list.convert(get<3>(*it),prediction);
+			cout << get<1>(*it) << " " << prediction << endl;
 		}
-
-		for (int i = 0;i < images.size();i++) {
-			cout << get<2>(images[i]) << ". " << get<1>(images[i]) << " :";
-			for (vector<int>::iterator it = (get<1>(results[i])).begin();it != (get<1>(results[i])).end();it++) {
-				string name;
-				class_list.convert(*it, name);
-				cout << " " << name;
-			}
-			cout << endl;
-		}
-		*/
-		vector<metrics> performanceMetrics;//gives performance metrics per class
-		Mat confusionMatrix;
-		int totalEntries;
-		createConfusionMatrix(results_predicted, results_actual, confusionMatrix, class_list.size(), totalEntries);
-		calculateMetrics(performanceMetrics, confusionMatrix, totalEntries);
-		generateROCgraph(performanceMetrics);
+		//vector<metrics> performanceMetrics;//gives performance metrics per class
+		//Mat confusionMatrix;
+		//int totalEntries;
+		//createConfusionMatrix(results_predicted, results_actual, confusionMatrix, class_list.size(), totalEntries);
+		//calculateMetrics(performanceMetrics, confusionMatrix, totalEntries);
+		//generateROCgraph(performanceMetrics);
 	}
+
+	cout << "total program runtime is : " << (getTickCount() - tick) / getTickFrequency() << " seconds" << endl;
 
 	system("pause");
 	return 0;
@@ -347,24 +346,27 @@ void setLayerSizes(string input, int firstLayer, int LastLayer, vector<int> & ou
 	output.push_back(LastLayer);//insert the output layer
 }
 
-void SegmentImage(Mat &inputImage, vector<Mat> &outputImages, int lower_threshold) {//segments image based on colour (basic segmentation= thresholding)
-																				  //to one channel
+void SegmentImage(Mat &inputImage, vector<Mat> &outputImages, int lower_threshold) {//segments image based on colour
+	//function declarations
 	void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30, int whiteThreshold = 30);
+	//variable definitions
 	Mat temp;
 	cvtColor(inputImage, temp, CV_BGR2GRAY);
-
+	
+	//function definition
 	//threshold the image
 	threshold(temp, temp, lower_threshold, 255, ThresholdTypes::THRESH_TOZERO);//perhaps try an adaptive thresholding rule too later
 	outputImages.push_back(temp);
+
 	//HSV segment
 	HSVsegment(inputImage, temp);
 	outputImages.push_back(temp);
 }
 
-double ExtractROIs(Mat inputImage, vector<Rect> & ROIs, ExtractionProperties props) {
+double ExtractROIs(Mat inputImage, vector<Rect> & ROIs, ExtractionProperties & props) {
 	//function declarations
 	void SegmentImage(Mat &inputImage, vector<Mat> &outputImages, int lower_threshold);
-	double mserExtractor(Mat inputImage, vector<Rect> & Rectangles, ExtractionProperties props);
+	double mserExtractor(Mat inputImage, vector<Rect> & Rectangles, ExtractionProperties & props);
 	
 	//variable declarations
 	vector<Mat> segmentedImages;
@@ -407,14 +409,15 @@ void TrainingFilterROIs(vector<imagetuple> images, vector<recttuple> & rectROIs,
 		Mat BlankImage = Mat::zeros(Size(1, 1), CV_8UC3);
 		namedWindow("Confirmation Window");
 		for (vector<recttuple>::iterator it = rectROIs.begin();it != rectROIs.end();it++) {
-			Mat DisplayImage = get<0>(images[get<1>(*it)]);//the image corresponding to the associated image number
+			Mat DisplayImage;
+			(get<0>(images[get<1>(*it)])).copyTo(DisplayImage);//the image corresponding to the associated image number
 
 			string class_name;
 			class_list.convert(get<2>(*it), class_name);
-			putText(DisplayImage, class_name + " y/n? ", Point(20, 20), FONT_HERSHEY_PLAIN, 1, Scalar(0, 0, 255), 2);
+			putText(DisplayImage, class_name + " y/n?", Point(20, 20), FONT_HERSHEY_PLAIN, 1, Scalar(0, 0, 255), 2);
 
 			rectangle(DisplayImage, get<0>(*it), Scalar(255, 0, 0), 2);//draw rectangle
-			imshow("Confirmation Window", BlankImage);
+			//imshow("Confirmation Window", BlankImage);
 			imshow("Confirmation Window", DisplayImage);
 
 			int	key;
@@ -438,9 +441,13 @@ void TrainingFilterROIs(vector<imagetuple> images, vector<recttuple> & rectROIs,
 	}
 }
 
-double mserExtractor(Mat inputImage, vector<Rect> & Rectangles, ExtractionProperties props) {
+double mserExtractor(Mat inputImage, vector<Rect> & Rectangles, ExtractionProperties & props) {
+	//function declarations
+	bool FilterROIResults(Rect RectangleUnderTesting, ExtractionProperties & props);
+	//variable declarations
 	int64 start = getTickCount();
-	bool FilterROIResults(Rect RectangleUnderTesting, Rect & Previous, ExtractionProperties props);
+	vector<Rect>temp;
+	
 	//set up the MSERextractor
 	Ptr<MSER> mserExtractor = MSER::create();
 	if (props.Area_min != 0)
@@ -448,38 +455,47 @@ double mserExtractor(Mat inputImage, vector<Rect> & Rectangles, ExtractionProper
 	if (props.Area_max != 0)
 		mserExtractor->setMaxArea(props.Area_max);
 	vector<vector<Point>> dummyVector;
-	mserExtractor->detectRegions(inputImage, dummyVector, Rectangles);
-
+	mserExtractor->detectRegions(inputImage, dummyVector, temp);
+	for (vector<Rect>::iterator it = temp.begin();it != temp.end();it++) {
+		if (FilterROIResults(*it, props))//filter based on dimensions
+			Rectangles.push_back(*it);
+	}
+	
 	return (getTickCount() - start) / getTickFrequency();
 }
 
-bool FilterROIResults(Rect RectangleUnderTesting, Rect & Previous, ExtractionProperties props) {
+bool FilterROIResults(Rect RectangleUnderTesting, ExtractionProperties & props) {
+	bool retval = true;//return value defaults to true
+
+	static Rect Previous(Point(0, 0), Point(0, 0));
 	float ratio = (float)RectangleUnderTesting.height / (float)RectangleUnderTesting.width;
 	//if image is not the right proportion return false
 	if (ratio > props.Ratio_U)
-		return false;
-	if (ratio < props.Ratio_L)
-		return false;
-	//if the image is the same as the last image return false
-	int duplicitiyCount = 0;
-	//test left side
-	if ((RectangleUnderTesting.x - (Previous).x) < RectangleUnderTesting.x / props.MatchingFactor)
-		duplicitiyCount++;
-	//test top side
-	if ((RectangleUnderTesting.y - (Previous).y) < RectangleUnderTesting.y / props.MatchingFactor)
-		duplicitiyCount++;
-	//test right side
-	if (((RectangleUnderTesting.width + RectangleUnderTesting.x) - ((Previous).width + (Previous).x)) < RectangleUnderTesting.width / props.MatchingFactor)
-		duplicitiyCount++;
-	//test bottom side
-	if (((RectangleUnderTesting.height + RectangleUnderTesting.y) - ((Previous).height + (Previous).y)) < RectangleUnderTesting.height / props.MatchingFactor)
-		duplicitiyCount++;
+		retval = false;
+	else if (ratio < props.Ratio_L)
+		retval = false;
+	else {
+		//if the image is the same as the last image return false
+		int duplicitiyCount = 0;
+		//test left side
+		if (std::abs(RectangleUnderTesting.x - (Previous).x) <= ((Previous.width * props.MatchingPercent) / 100))
+			duplicitiyCount++;
+		//test top side
+		if (std::abs(RectangleUnderTesting.y - (Previous).y) <= ((Previous.height * props.MatchingPercent) / 100))
+			duplicitiyCount++;
+		//test right side
+		if (std::abs((RectangleUnderTesting.width + RectangleUnderTesting.x) - ((Previous).width + (Previous).x)) <= ((Previous.width * props.MatchingPercent) / 100))
+			duplicitiyCount++;
+		//test bottom side
+		if (std::abs((RectangleUnderTesting.height + RectangleUnderTesting.y) - ((Previous).height + (Previous).y)) <= ((Previous.width * props.MatchingPercent) / 100))
+			duplicitiyCount++;
 
-	if (duplicitiyCount > 1) {//if there are 2 sides that are the same consider it a duplicate
-		return false;
+		if (duplicitiyCount > 1) {//if there are 2 sides that are about the same consider it a duplicate
+			retval = false;
+		}
 	}
 	Previous = RectangleUnderTesting;
-	return true;
+	return retval;
 }
 
 double ExtractFeatures(Mat ROI, Mat & outputRow) {//input a Mat, output a row of features.
@@ -556,7 +572,7 @@ classes::classes() {
 };
 
 bool classes::convert(string from_name, int & to_number) {
-	to_number = -1;// -1 indicates no match, is changed to something if a match is found
+	to_number = 0;// -1 indicates no match, is changed to something if a match is found
 	if (class_list.empty())
 		return false;
 	static pair<string, int> last_member = class_list.front();
@@ -585,8 +601,10 @@ bool classes::convert(int from_number, string & to_name) {
 		return true;
 	if (class_list.empty())//if empty, return false
 		return false;
-	if (from_number > class_list.size())//if too high, return false, class is invalid
+	if (from_number > class_list.size()) {//if too high, return false, class is not recognized
+		"unrecognized class";
 		return false;
+	}
 
 	to_name = (class_list[from_number]).first;//else find the appropriate class
 	return true;
@@ -694,8 +712,8 @@ void createConfusionMatrix(Mat results_predicted, Mat results_actual, Mat & conf
 	int row, col;
 	//recall that format is Mat.<type>at(y,x) where in our case, each y is the result from a different image, and x is the result for each class
 	for (int i = 0;i < results_predicted.rows;i++) {//iterate through every result
-		row = (uchar)results_predicted.at<float>(i, 0);
-		col = (uchar)results_actual.at<float>(i, 0);
+		row = (int)results_predicted.at<uchar>(i, 0);
+		col = (int)results_actual.at<uchar>(i, 0);
 		_confusionMatrix.at<uchar>(col, row)++;//for each result set, increment the correct element of the confusion matrix
 		totalEntries++;//increment the running total
 	}
@@ -768,7 +786,7 @@ Mat generateROCgraph(vector<metrics> input) {
 }
 
 Mat createResponseMat(vector<imagetuple> responses, int classCount, int imageCount) {
-	Mat output(imageCount, classCount, CV_32F);
+	Mat output(imageCount, classCount, CV_8U);
 	vector<bool> rowTracker;//tracks the number of non-"none" entries per a row(image)
 	for (int i = 0; i < imageCount;i++) {
 		rowTracker.push_back(false);
@@ -778,13 +796,14 @@ Mat createResponseMat(vector<imagetuple> responses, int classCount, int imageCou
 		//int classNumber = get<3>(responses[i])	(col)
 		//int imageNumber = get<2>(responses[i])	(row)
 		if (get<3>(responses[i]) != 0) {//if not a "none" class
-			output.at<float>(get<2>(responses[i]), get<3>(responses[i])) = 1.f;//rows=image cols=response
+			output.at<uchar>(get<2>(responses[i]), get<3>(responses[i])) = 1.f;//rows=image cols=response
 			vector<bool>::iterator it = rowTracker.begin() + i;
+			rowTracker[get<2>(responses[i])] = true;
 		}
 	}
 	for (int i = 0;i < rowTracker.size();i++) {
-		if (rowTracker[i])
-			output.at<float>(i, 0) = 1.f;
+		if (rowTracker[i] == false)
+			output.at<uchar>(i, 0) = 1;
 	}
 	return output;
 }

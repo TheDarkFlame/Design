@@ -3,158 +3,216 @@
 #include "opencv2/features2d.hpp"
 #include "opencv2/objdetect.hpp"
 #include <cstdlib>
-#include <cstdio>
+#include <iostream>
 #include <vector>
 #include <cmath>
 #include <sstream>
 
+typedef struct ExtractionProperties {
+	int Threshold_L;//lower threshold (anything below becomes black)
+	int Threshold_U;//upper threshold (currently not implemented)
+	double Ratio_L;//lower threshold for ratio of width to height of detected regions
+	double Ratio_U;//upper threshold for ratio of width to height of detected regions
+	int Area_max;//maximum area size of regions
+	int Area_min;//minimum area size of regions
+	int MatchingPercent;//this is percentage of width that the ROIs edges must match by to be considered duplicates
+} ExtractionProperties;
+
 using namespace cv;
 using namespace std;
 // Global variables
-char* window_name[] = { "output","gray threshold","canny","mser" };
+char* window_name[] = { "Thresholding","ROIS" };
 
-int threshold_value = 127, Canny_threshold = 127, Hough_threshold, Erosion_type, Erosion_size;
+int threshold_value = 70;
 
-Mat gray, src, dst;
+Mat gray, src, hsv;
 
 
 int main(int argc, char** argv) {
-	void thresholdFunc(int, void*);
-	char* trackbarTitles[50] = { "Thresholding","Canny","Hough","Erosion Type","Erosion Kernel Size" };
+	string createFilename(string extension, string baseName, int number, int maxNumber);
+	string keys =
+		"{name|test|this is the basename of every image, image is of form <name><number><ext> eg test1.png}"
+		"{maxNumber|10|this is the number of images that are in the series}"
+		"{ext|.png|the extension of the images}"
+		;
+	CommandLineParser parser(argc, argv, keys);
+	string name = parser.get<string>("name");
+	int range = parser.get<int>("maxNumber");
+	string extension = parser.get<string>("ext");
 
-	//load image
-	src = imread(argv[1], 1);
-	if (src.empty())
+	if (range < 1)
 		return -1;
 
-	//make gray
-	cv::cvtColor(src, gray, CV_BGR2GRAY);
+	void thresholdFunc(int, void*);
+	char* trackbarTitles[50] = { "Thresholding" };
+	cout << "time in ms for Grayscale Conversion and Thresholding : number of ROIs" << endl;
+	//load image
+	src = imread(createFilename(extension, name, 1, range), 1);
+	if (src.empty())
+		return -1;
 
 	//make window to show output
 	namedWindow(window_name[0], CV_WINDOW_AUTOSIZE);
 
 	//make trackbar to control the window
 	createTrackbar(trackbarTitles[0], window_name[0], &threshold_value, 255, thresholdFunc);
-	createTrackbar(trackbarTitles[1], window_name[0], &Canny_threshold, 1000, thresholdFunc);
-	createTrackbar(trackbarTitles[2], window_name[0], &Hough_threshold, 150, thresholdFunc);
-	createTrackbar(trackbarTitles[3], window_name[0], &Erosion_type, 2, thresholdFunc);
-	createTrackbar(trackbarTitles[4], window_name[0], &Erosion_size, 21, thresholdFunc);
 
 	//initialize
 	thresholdFunc(0, 0);
 	while (true)
 	{
+		static int i = 1;
 		int c;
 		c = waitKey(20);
 		if ((char)c == 27)
 		{
 			break;
 		}
+		else if (char(c) == 32) {
+			
+			src = imread(createFilename(extension, name, ++i, range));
+			thresholdFunc(NULL, NULL);
+		}
 	}
 
+}
+
+string createFilename(string extension, string baseName, int number, int maxNumber) {
+	stringstream filename;
+	filename << baseName << (number % maxNumber + 1) << extension;
+	string fullname = filename.str();
+	return fullname;
 }
 
 void thresholdFunc(int, void*)
 {
-	int	start = getTickCount();
-	void mserExtractor(const Mat& image, Mat& mserOutMask, vector<Mat>&output_images);
-	void HoughFunc(Mat &input);
-	static Mat gray_dst, canny_dst, mserdst;
-	vector<Mat>imageRegions;
-	dst = src.clone();
-	mserdst = src.clone();
+	void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30, int whiteThreshold = 30);
+	double mserExtractor(Mat inputImage, vector<Rect> & Rectangles, ExtractionProperties & props);
+	int64 time = getTickCount();
+
+	ExtractionProperties ExProps;
+	ExProps.Area_min = 20 * 20;
+	ExProps.Area_max = 0;//no max limit
+	ExProps.Ratio_L = 0.8;
+	ExProps.Ratio_U = 1.25;
+	ExProps.MatchingPercent = 25;
+	ExProps.Threshold_L = 127;
+	ExProps.Threshold_U = 200;
+	
+	//gray thresholding
+	cvtColor(src, gray, CV_BGR2GRAY);
+	threshold(gray, gray, threshold_value, 255, 3);
+
+	//HSV segmenting
+	HSVsegment(src, hsv);
+
+	cout << "Segmentation : " << (getTickCount() - time) / getTickFrequency() * 1000 << "ms" << endl;
 	
 
-	//image thresholding
-	threshold(gray, gray_dst, threshold_value, 255, 3);
-	imshow(window_name[1], gray_dst);
-
+	Mat dispImg;
+	src.copyTo(dispImg);
 	//MSER feature detection
-	mserExtractor(gray_dst, mserdst,imageRegions);
-	imshow(window_name[3], mserdst);
-	int i = 0;
-	for (vector<Mat>::iterator it = imageRegions.begin();it != imageRegions.end();it++) {
-		stringstream temp;
-		temp << i;
-		imshow(temp.str(), (*it));
+	vector<Rect>Rectangles;
+
+	cout << "MSER : " << 1000 * mserExtractor(gray, Rectangles, ExProps) << "ms";
+	cout << " : " << Rectangles.size() << endl << endl;
+	for (vector<Rect>::iterator it = Rectangles.begin();it != Rectangles.end();it++) {
+		rectangle(dispImg, *it, Scalar(255,0,0), 2);
 	}
 
-	//edge detection
-	Canny(gray_dst, canny_dst, Canny_threshold, Canny_threshold * 3, 3);
-	imshow(window_name[2], canny_dst);
-	
-	//hough lines
-	HoughFunc(canny_dst);
+	Rectangles.erase(Rectangles.begin(), Rectangles.end());
 
-	imshow(window_name[0], dst);
-	printf("%d", getTickCount() - start);
-	
-}
-
-void HoughFunc(Mat &input) {
-
-	std::vector<Vec2f>lines;
-	cv::HoughLines(input, lines, 1, CV_PI / 180, 50 + Hough_threshold, 0, 0);
-
-	for (Vec2f vec2f_line : lines) {//for each line in lines
-		float r = vec2f_line[0], t = vec2f_line[1];
-		float cos_t = cosf(t), sin_t = sinf(t);
-		float x0 = r*cos_t, y0 = r*sin_t;
-		float alpha = 50;
-		Point pt1(cvRound(x0 + alpha*(-sin_t)), cvRound(y0 + alpha*cos_t));
-		Point pt2(cvRound(x0 - alpha*(-sin_t)), cvRound(y0 - alpha*cos_t));
-
-		line(dst, pt1, pt2, Scalar(255, 0, 0), 1, LINE_AA);
+	cout << "MSER : " << 1000 * mserExtractor(hsv, Rectangles, ExProps) << "ms";
+	cout << " : " << Rectangles.size() << endl << endl;
+	for (vector<Rect>::iterator it = Rectangles.begin();it != Rectangles.end();it++) {
+		rectangle(dispImg, *it, Scalar(0,0,255), 2);
 	}
+
+	imshow(window_name[0], dispImg);
 }
 
-void mserExtractor(const Mat& image, Mat& mserOutMask,vector<Mat>&output_images) {
+double mserExtractor(Mat inputImage, vector<Rect> & Rectangles, ExtractionProperties & props) {
+	//function declarations
+	bool FilterROIResults(Rect RectangleUnderTesting, ExtractionProperties & props);
+	//variable declarations
+	int64 start = getTickCount();
+	vector<Rect>temp;
+
+	//set up the MSERextractor
 	Ptr<MSER> mserExtractor = MSER::create();
-	vector<vector<cv::Point>> mserContours;
-	vector<KeyPoint> mserKeypoint;
-	vector<cv::Rect> mserBbox;
-	mserExtractor->detectRegions(image, mserContours, mserBbox);
+	if (props.Area_min != 0)
+		mserExtractor->setMinArea(props.Area_min);
+	if (props.Area_max != 0)
+		mserExtractor->setMaxArea(props.Area_max);
+	vector<vector<Point>> dummyVector;
+	mserExtractor->detectRegions(inputImage, dummyVector, temp);
+	for (vector<Rect>::iterator it = temp.begin();it != temp.end();it++) {
+		if (FilterROIResults(*it, props))//filter based on dimensions
+			Rectangles.push_back(*it);
+	}
 
-	int i=0;
-	stringstream windowname;
-	int prev_x = 0, prev_width = 0, prev_y = 0, prev_height = 0;
-	for (std::vector<cv::Rect>::iterator it = mserBbox.begin();it != mserBbox.end();it++) {
-		float aspect_ratio = (((float)(*it).height) / ((float)(*it).width));
-		//consider only rectangles of appropriate dimensions and that are in the bounds of the original image
-		if (aspect_ratio > 0.75
-			&& aspect_ratio < 1.25
-			&& (*it).x + (*it).width < image.size().width
-			&& (*it).y + (*it).height < image.size().height
-			&& (*it).width>30
-			&& (*it).height>30
-			&& !(
-				(*it).x == prev_x
-				&& (*it).y == prev_y
-				&& (*it).width == prev_width
-				&& (*it).height == prev_height)
-			) {
-			windowname << i++;
-			rectangle(mserOutMask, *it, Scalar(255, 0, 0), 4, 8, 0);
-			imshow(windowname.str(), image(Range((*it).y, (*it).y + (*it).height), Range((*it).x, (*it).x + (*it).width)));
-			prev_x = (*it).x;
-			prev_y = (*it).y;
-			prev_height = (*it).height;
-			prev_width = (*it).width;
+	return (getTickCount() - start) / getTickFrequency();
+}
+
+bool FilterROIResults(Rect RectangleUnderTesting, ExtractionProperties & props) {
+	bool retval = true;//return value defaults to true
+
+	static Rect Previous(Point(0, 0), Point(0, 0));
+	float ratio = (float)RectangleUnderTesting.height / (float)RectangleUnderTesting.width;
+	//if image is not the right proportion return false
+	if (ratio > props.Ratio_U)
+		retval = false;
+	else if (ratio < props.Ratio_L)
+		retval = false;
+	else {
+		//if the image is the same as the last image return false
+		int duplicitiyCount = 0;
+		//test left side
+		if (std::abs(RectangleUnderTesting.x - (Previous).x) <= ((Previous.width * props.MatchingPercent) / 100))
+			duplicitiyCount++;
+		//test top side
+		if (std::abs(RectangleUnderTesting.y - (Previous).y) <= ((Previous.height * props.MatchingPercent) / 100))
+			duplicitiyCount++;
+		//test right side
+		if (std::abs((RectangleUnderTesting.width + RectangleUnderTesting.x) - ((Previous).width + (Previous).x)) <= ((Previous.width * props.MatchingPercent) / 100))
+			duplicitiyCount++;
+		//test bottom side
+		if (std::abs((RectangleUnderTesting.height + RectangleUnderTesting.y) - ((Previous).height + (Previous).y)) <= ((Previous.width * props.MatchingPercent) / 100))
+			duplicitiyCount++;
+		
+		if (duplicitiyCount > 1) {//if there are 2 sides that are about the same consider it a duplicate
+			retval = false;
 		}
 	}
+	Previous = RectangleUnderTesting;
+	return retval;
 }
 
-void HOGfeatureExtractor(const Mat& input_image, Mat & output_data) {
-	Mat resized_image;
-	resize(input_image, resized_image, Size(200,200));//get a standard size for images to work with
-	HOGDescriptor hog(Size(64, 128), Size(16, 16), Size(8, 8), Size(8, 8), 9);
-	//window size=64x128 , we will resize everything to be 64x128
-	//block size=16 pixels long
-	//block step size (block stride)=8pixels (so each block starts at 8 pixels after the next
-	//cell size =8
-	//bin count =9
-	vector<float> descriptorValue;
-	vector<Point> locations;
-	hog.compute(resized_image, descriptorValue, Size(0, 0), Size(0, 0), locations);
-	
+void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30, int whiteThreshold = 30) {
+	static int prevSegmentSize = 0;
+	static Mat lut(1, 256, CV_8UC3);
+	if (prevSegmentSize != segmentSize) {
+		for (int i = 0;i < 256;i++) {
+			int extraHue = i % segmentSize;
+
+			if (i + segmentSize - extraHue >= 180)
+				lut.at<Vec3b>(i)[0] = 0;//H channel
+			else if (extraHue < segmentSize / 2)
+				lut.at<Vec3b>(i)[0] = i - extraHue;//H channel
+			else
+				lut.at<Vec3b>(i)[0] = i - extraHue + segmentSize;//H channel
+
+			if (i < whiteThreshold)
+				lut.at<Vec3b>(i)[1] = 0;//S channel
+			else
+				lut.at<Vec3b>(i)[1] = i;//S channel
+
+			lut.at<Vec3b>(i)[2] = 127;//V channel
+		}
+		prevSegmentSize = segmentSize;
+	}
+
+	cvtColor(inputImage, outputImage, CV_BGR2HSV);
+	LUT(outputImage, lut, outputImage);
+	cvtColor(outputImage, outputImage, CV_HSV2BGR);
 }
