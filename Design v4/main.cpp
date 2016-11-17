@@ -34,14 +34,6 @@ typedef struct ProgramFlags {
 	bool preDetected;//ROIs are pre-detected (we do not detect them)
 } ProgramFlags;
 
-typedef struct metrics {
-	float FPrate;
-	float TPrate;
-	float Precision;
-	float Accuracy;
-	float Fscore;
-} metrics;
-
 typedef tuple<Mat, string, int, int> imagetuple;//0:Mat=image 1:string=imageName 2:int1=imageNumber 3:int2=classNumber
 
 typedef tuple<Rect, int, int> recttuple;//0:Rect=ROIrectangle 1:int1=associatedImageNumber 2:int2=classNumber
@@ -59,19 +51,23 @@ public:
 
 class TrainingAnswers {
 private:
-	vector<bool> answers;
+	vector<int> answers;
 	string filename;
 	bool answersPreexist;
 public:
 	TrainingAnswers() {};
 	~TrainingAnswers();
 	bool initialize(string directory);
-	bool getAnswer(int index);
-	void pushAnswer(bool answer);
+	int getAnswer(int index);
+	void pushAnswer(int answer);
 	void writeOut();
 	bool answersExist();
 	int size();
 };
+
+//new globals for review bit
+vector<imagetuple> images;
+classes class_list;
 
 int main(int argc, char** argv) {
 	//@
@@ -85,10 +81,8 @@ int main(int argc, char** argv) {
 	void setLayerSizes(string input, int firstLayer, int LastLayer, vector<int> & output);
 	double trainNetwork(const Mat Tdata, const Mat Tresponses, string networkDir, vector<int> layerSizes, bool newNetwork);
 	bool Predict(Mat data, Mat & responses1D, Mat & responses2D, string networkDir);
-	void createConfusionMatrix(Mat results_predicted, Mat results_actual, Mat & confusionMatrix, int matrixClassCount, int & totalEntries);
-	void calculateMetrics(vector<metrics> & data, Mat confusionMatrix, int totalEntries);
-	Mat generateROCgraph(vector<metrics> input);
 	Mat createResponseMat(vector<imagetuple> responses, int classCount, int imageCount);
+	void drawRegions(int, void*);
 
 	//@
 	//extract all program options
@@ -141,7 +135,7 @@ int main(int argc, char** argv) {
 	ProgFlags.preDetected = (parser.has("skipROI"));
 
 	//initialize class list
-	classes class_list;
+	//classes class_list;//this is now global
 	string classfile = parser.get<string>("classes");
 	if (!class_list.initialize(classfile)) {
 		cout << "failed to initialize classes, please ensure that a valid class file " + classfile + " exists";
@@ -167,7 +161,7 @@ int main(int argc, char** argv) {
 
 
 	//image number should just be the index number for most situations
-	vector<imagetuple> images;
+	//vector<imagetuple> images; //this is global now
 
 	for (int imageNumber = 0;imageNumber < imageNames.size();imageNumber++) {
 		Mat temp = imread(imagePath + "/" + imageNames[imageNumber], IMREAD_COLOR);
@@ -179,6 +173,7 @@ int main(int argc, char** argv) {
 	cout << "read in " << images.size() << " images for evaluation" << endl;
 
 	vector<imagetuple>ROIs;//ROIs
+	vector<recttuple>rectROIs;
 	if (ProgFlags.Debug && ProgFlags.preDetected) {//colour segment the ROIs like a normal ROI would be
 		for (vector<imagetuple> ::iterator it = images.begin();it != images.end();it++) {
 			Mat temp;
@@ -189,8 +184,8 @@ int main(int argc, char** argv) {
 	else {//else perform extraction of ROIs
 		cout << "ROI distribution as follows:" << endl << "<image> <ROIs in image>" << endl;
 		timeTaken = 0;
-
-		vector<recttuple>rectROIs;
+		
+		//vector<recttuple>rectROIs; this is now used later, so is no longer specific to this only
 		for (vector<imagetuple>::iterator it_img = images.begin();it_img != images.end();it_img++) {
 			vector<Rect>temp;
 			timeTaken += ExtractROIs(get<0>(*it_img), temp, ExProps);
@@ -270,18 +265,69 @@ int main(int argc, char** argv) {
 			class_list.convert(get<3>(*it),prediction);
 			cout << get<1>(*it) << " " << prediction << endl;
 		}
-		//vector<metrics> performanceMetrics;//gives performance metrics per class
-		//Mat confusionMatrix;
-		//int totalEntries;
-		//createConfusionMatrix(results_predicted, results_actual, confusionMatrix, class_list.size(), totalEntries);
-		//calculateMetrics(performanceMetrics, confusionMatrix, totalEntries);
-		//generateROCgraph(performanceMetrics);
+		if (!ProgFlags.preDetected) {
+
+		//make some sort of visual output
+			vector<recttuple>resultingRects = rectROIs;
+			for (int i = 0;i < resultingRects.size();i++) {
+				get<2>(resultingRects[i]) = get<3>(responses[i]);
+			}
+
+			int threshold_value = 0;
+			namedWindow("Review Window");
+			createTrackbar("Image Select", "Review Window", &threshold_value, images.size() - 1, drawRegions, (void*)(&resultingRects));
+			drawRegions(0, (void*)(&resultingRects));
+			
+			while (true)
+			{
+				static int i = 1;
+				int c;
+				c = waitKey(20);
+				if ((char)c == 27)
+				{
+					break;
+				}
+			}
+		}
+
 	}
 
 	cout << "total program runtime is : " << (getTickCount() - tick) / getTickFrequency() << " seconds" << endl;
 
 	system("pause");
 	return 0;
+}
+
+void drawRegions(int trackpos, void* data) {
+	vector<recttuple>rects = *((vector<recttuple>*)data);
+	Mat dispImage;
+	int num_classes = class_list.size();
+	(get<0>(images[trackpos])).copyTo(dispImage);//set the correct image for displaying
+	for (vector<recttuple>::iterator it = rects.begin();it != rects.end();it++) {
+		if (get<1>(*it) == trackpos) {
+			int class_number = get<2>(*it);
+			Scalar colour;
+			switch (class_number) {
+			case 1: colour = Scalar(255, 0, 0);
+				break;
+			case 2: colour = Scalar(0, 0, 255);
+				break;
+			case 3: colour = Scalar(0, 255, 0);
+			default: colour = Scalar(255, 255, 255);
+			}
+			rectangle(dispImage, get<0>(*it), colour);
+		}
+	}
+	string temp;
+	class_list.convert(1, temp);
+	putText(dispImage, temp, Point(5, dispImage.rows - 5), FONT_HERSHEY_COMPLEX_SMALL, 0.75, Scalar(255, 0, 0));
+	class_list.convert(2, temp);
+	putText(dispImage, temp, Point(5, dispImage.rows - 15), FONT_HERSHEY_COMPLEX_SMALL, 0.75, Scalar(0, 0, 255));
+	class_list.convert(3, temp);
+	putText(dispImage, temp, Point(5, dispImage.rows - 25), FONT_HERSHEY_COMPLEX_SMALL, 0.75, Scalar(0, 255, 0));
+	class_list.convert(0, temp);
+	putText(dispImage, temp, Point(5, dispImage.rows - 35), FONT_HERSHEY_COMPLEX_SMALL, 0.75, Scalar(255, 255, 255));
+	imshow("Review Window", dispImage);
 }
 
 bool Predict(Mat data, Mat & responses1D, Mat & responses2D, string networkDir) {
@@ -384,6 +430,7 @@ double ExtractROIs(Mat inputImage, vector<Rect> & ROIs, ExtractionProperties & p
 
 void TrainingFilterROIs(vector<imagetuple> images, vector<recttuple> & rectROIs, classes class_list, ProgramFlags ProgFlags, string answerFileDirectory) {
 	//ask user about each ROI or find it all from a textfile
+	enum answerTypes{YES,NO,OTHER};
 	TrainingAnswers answers;
 	bool FilterManually = true;
 	if (ProgFlags.Debug) {
@@ -400,9 +447,15 @@ void TrainingFilterROIs(vector<imagetuple> images, vector<recttuple> & rectROIs,
 		cout << "automatically filtering ROIs for training according to previous choices" << endl;
 		int i = 0;
 		for (vector<recttuple>::iterator it = rectROIs.begin();it != rectROIs.end();it++) {
-			if (answers.getAnswer(i++) == false) {//if not correct classification
+			if (answers.getAnswer(i) == NO) {//if not correct classification
 				get<2>(*it) = 0;//"none" classification
 			}
+			else if (answers.getAnswer(i) == OTHER) {//if it is a sign, but the wrong sign, then remove it
+				vector<recttuple>::iterator temp = it;
+				it++;
+				rectROIs.erase(temp);
+			}
+			i++;
 		}
 	}
 	else {//else manually answer each one if no file is set up or if not in debug
@@ -414,7 +467,7 @@ void TrainingFilterROIs(vector<imagetuple> images, vector<recttuple> & rectROIs,
 
 			string class_name;
 			class_list.convert(get<2>(*it), class_name);
-			putText(DisplayImage, class_name + " y/n?", Point(20, 20), FONT_HERSHEY_PLAIN, 1, Scalar(0, 0, 255), 2);
+			putText(DisplayImage, class_name + "(y)es/(n)o/(o)ther sign", Point(5, DisplayImage.rows-5), FONT_HERSHEY_COMPLEX_SMALL, 0.6, Scalar(0, 0, 255), 2);
 
 			rectangle(DisplayImage, get<0>(*it), Scalar(255, 0, 0), 2);//draw rectangle
 			//imshow("Confirmation Window", BlankImage);
@@ -423,13 +476,19 @@ void TrainingFilterROIs(vector<imagetuple> images, vector<recttuple> & rectROIs,
 			int	key;
 			do {
 				key = waitKey(0);
-			} while (!((key == 'y') || (key == 'n')));
+			} while (!((key == 'y') || (key == 'n') || (key == 'o')));
 			if (key == 'n') {
 				get<2>(*it) = 0;
-				if (ProgFlags.Debug) answers.pushAnswer(false);
+				if (ProgFlags.Debug) answers.pushAnswer(NO);
+			}
+			else if (key == 'o') {
+				vector<recttuple>::iterator temp = it;
+				it--;
+				rectROIs.erase(temp);// our new next is same as if there wasn't temp there.
+				if (ProgFlags.Debug) answers.pushAnswer(OTHER);
 			}
 			else {
-				if (ProgFlags.Debug) answers.pushAnswer(true);
+				if (ProgFlags.Debug) answers.pushAnswer(YES);
 			}
 		}
 	}
@@ -652,17 +711,17 @@ bool TrainingAnswers::initialize(string directory) {
 	return true;
 }
 
-bool TrainingAnswers::getAnswer(int index) {
+int TrainingAnswers::getAnswer(int index) {
 	return answers[index];
 }
 
-void TrainingAnswers::pushAnswer(bool answer) {
+void TrainingAnswers::pushAnswer(int answer) {
 	answers.push_back(answer);
 }
 
 void TrainingAnswers::writeOut() {
 	ofstream file(filename);
-	for (vector<bool>::iterator it = answers.begin();it != answers.end();it++) {
+	for (vector<int>::iterator it = answers.begin();it != answers.end();it++) {
 		file << *it << endl;
 	}
 	file.close();
@@ -704,85 +763,6 @@ void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30, int whi
 	cvtColor(inputImage, outputImage, CV_BGR2HSV);
 	LUT(outputImage, lut, outputImage);
 	cvtColor(outputImage, outputImage, CV_HSV2BGR);
-}
-
-void createConfusionMatrix(Mat results_predicted, Mat results_actual, Mat & confusionMatrix, int matrixClassCount, int & totalEntries) {
-	Mat _confusionMatrix = Mat::zeros(matrixClassCount, matrixClassCount, CV_8U);//create an empty NxN matrix
-	totalEntries = 0;
-	int row, col;
-	//recall that format is Mat.<type>at(y,x) where in our case, each y is the result from a different image, and x is the result for each class
-	for (int i = 0;i < results_predicted.rows;i++) {//iterate through every result
-		row = (int)results_predicted.at<uchar>(i, 0);
-		col = (int)results_actual.at<uchar>(i, 0);
-		_confusionMatrix.at<uchar>(col, row)++;//for each result set, increment the correct element of the confusion matrix
-		totalEntries++;//increment the running total
-	}
-	confusionMatrix = _confusionMatrix;
-}
-
-void calculateMetrics(vector<metrics> & data, Mat confusionMatrix, int totalEntries) {
-	//function&var declarations
-	
-	int numClasses = confusionMatrix.cols;
-	metrics temp;
-	//vector<float>FPrate;
-	//vector<float>TPrate;
-	//vector<float>Precision;
-	//vector<float>Accuracy;
-	//vector<float>Fscore;
-	for (int classSelect = 0;classSelect < numClasses;classSelect++) {//for each class
-
-																	  //calculate the totals (per class)
-																	  //--------------------------------
-																	  //note all the stuff below is easier to understand when drawing a 3x3 confusion matrix
-																	  //and labelling the areas of the matrix WRT a single class
-																	  //	TPrate = TP/P
-																	  //	FPrate = FP/N
-																	  //	Precision = TP/(TP+FP)
-																	  //	Fscore=Precision X TPrate
-																	  //	Accuracy=(TP+TN)/(P+N)
-		int actualClassTotal = 0, predictedClassTotal = 0;//per class this is the number of times the class *actually* occurs (instead of predicted occurs)
-		for (int j = 0;j < numClasses;j++) {
-			actualClassTotal += confusionMatrix.at<uchar>(j, classSelect);//sum of all entries on the same column -- A(i)
-			predictedClassTotal += confusionMatrix.at<uchar>(classSelect, j);//sum of all entries on the same row -- P(i)
-		}
-
-
-		//calculate TPrate aka Recall
-		//---------------------------
-		float P = (float)actualClassTotal;
-		float TP = (float)confusionMatrix.at<uchar>(classSelect, classSelect);
-		temp.TPrate = (TP / P);
-
-		//calculate FPrate
-		//----------------
-		float FP, N;
-		N = (float)(totalEntries - actualClassTotal);
-		FP = (float)(predictedClassTotal - confusionMatrix.at<uchar>(classSelect, classSelect));
-		temp.FPrate = (FP / N);
-
-		//calculate Accuracy,Precision,F-Score
-		//------------------------------------
-		float TN = totalEntries - FP - P;
-		temp.Accuracy = ((TP + TN) / (P + N));
-		temp.Precision = (TP / (TP + FP));
-		temp.Fscore = (temp.Precision * temp.TPrate);
-
-		//push into vector
-		data.push_back(temp);
-
-	}//end for each class
-}
-
-Mat generateROCgraph(vector<metrics> input) {
-	Mat graph(100, 100, CV_8UC1);
-	for (vector<metrics>::iterator it = input.begin();it != input.end();it++) {
-		int x = (int)(*it).FPrate * 100;
-		int y = (int)(*it).TPrate * 100;
-		Point plotPoint(x, y);
-		circle(graph, plotPoint, 2, 0, -1);
-	}
-	return graph;
 }
 
 Mat createResponseMat(vector<imagetuple> responses, int classCount, int imageCount) {
