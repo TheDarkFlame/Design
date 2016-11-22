@@ -24,28 +24,34 @@ using namespace std;
 char* window_name[] = { "Thresholding","ROIS" };
 
 int threshold_value = 70;
+int HSV_threshold = 9;
+int counter = 1;
+int counter_minus1 = 0;
 
-Mat gray, src, hsv;
+Mat gray, src, hsv, hsv_disp, gray_disp;
 
+string name;
+int range;
+string extension;
 
 int main(int argc, char** argv) {
 	string createFilename(string extension, string baseName, int number, int maxNumber);
 	string keys =
 		"{name|test|this is the basename of every image, image is of form <name><number><ext> eg test1.png}"
-		"{maxNumber|10|this is the number of images that are in the series}"
+		"{maxNumber|10|the number of the last image in the series}"
 		"{ext|.png|the extension of the images}"
 		;
 	CommandLineParser parser(argc, argv, keys);
-	string name = parser.get<string>("name");
-	int range = parser.get<int>("maxNumber");
-	string extension = parser.get<string>("ext");
+	name = parser.get<string>("name");
+	range = parser.get<int>("maxNumber") + 1;
+	extension = parser.get<string>("ext");
 
 	if (range < 1)
 		return -1;
 
+	void imgSel(int, void*);
 	void thresholdFunc(int, void*);
-	char* trackbarTitles[50] = { "Thresholding" };
-	cout << "time in ms for Grayscale Conversion and Thresholding : number of ROIs" << endl;
+	cout << "Region Detection Demo" << endl;
 	//load image
 	src = imread(createFilename(extension, name, 1, range), 1);
 	if (src.empty())
@@ -55,13 +61,14 @@ int main(int argc, char** argv) {
 	namedWindow(window_name[0], CV_WINDOW_AUTOSIZE);
 
 	//make trackbar to control the window
-	createTrackbar(trackbarTitles[0], window_name[0], &threshold_value, 255, thresholdFunc);
-
+	createTrackbar("Thresholding", window_name[0], &threshold_value, 255, thresholdFunc);
+	createTrackbar("Image Select", window_name[0], &counter_minus1, range - 2, imgSel);
+	//createTrackbar("HSVthresh", window_name[0], &HSV_threshold, 60, thresholdFunc);
 	//initialize
 	thresholdFunc(0, 0);
+
 	while (true)
 	{
-		static int i = 1;
 		int c;
 		c = waitKey(20);
 		if ((char)c == 27)
@@ -69,8 +76,10 @@ int main(int argc, char** argv) {
 			break;
 		}
 		else if (char(c) == 32) {
-			
-			src = imread(createFilename(extension, name, ++i, range));
+			((counter + 1) % range == 0) ? counter = 1 : counter = counter + 1;//wrap around, but skip 0
+			string fname = createFilename(extension, name, counter, range);
+			src = imread(fname);
+			cout << fname << endl;
 			thresholdFunc(NULL, NULL);
 		}
 	}
@@ -79,7 +88,7 @@ int main(int argc, char** argv) {
 
 string createFilename(string extension, string baseName, int number, int maxNumber) {
 	stringstream filename;
-	filename << baseName << (number % maxNumber + 1) << extension;
+	filename << baseName << (number % maxNumber) << extension;
 	string fullname = filename.str();
 	return fullname;
 }
@@ -89,6 +98,10 @@ void thresholdFunc(int, void*)
 	void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30, int whiteThreshold = 30);
 	double mserExtractor(Mat inputImage, vector<Rect> & Rectangles, ExtractionProperties & props);
 	int64 time = getTickCount();
+	
+	if (HSV_threshold < 9) {
+		HSV_threshold = 9;
+	}
 
 	ExtractionProperties ExProps;
 	ExProps.Area_min = 20 * 20;
@@ -104,31 +117,52 @@ void thresholdFunc(int, void*)
 	threshold(gray, gray, threshold_value, 255, 3);
 
 	//HSV segmenting
-	HSVsegment(src, hsv);
+	HSVsegment(src, hsv, 30, HSV_threshold);
 
-	cout << "Segmentation : " << (getTickCount() - time) / getTickFrequency() * 1000 << "ms" << endl;
+	cout << "Segmentation   = " << (getTickCount() - time) / getTickFrequency() * 1000 << "ms" << endl;
 	
 
 	Mat dispImg;
 	src.copyTo(dispImg);
+	hsv.copyTo(hsv_disp);
+	gray.copyTo(gray_disp);
 	//MSER feature detection
 	vector<Rect>Rectangles;
 
-	cout << "MSER : " << 1000 * mserExtractor(gray, Rectangles, ExProps) << "ms";
-	cout << " : " << Rectangles.size() << endl << endl;
+	cout << "Grayscale MSER = " << 1000 * mserExtractor(gray, Rectangles, ExProps) << "ms";
+	cout << " | Regions = " << Rectangles.size() << endl;
 	for (vector<Rect>::iterator it = Rectangles.begin();it != Rectangles.end();it++) {
-		rectangle(dispImg, *it, Scalar(255,0,0), 2);
+		rectangle(dispImg, *it, Scalar(0, 255, 0), 1);
+		rectangle(gray_disp, *it, Scalar(0, 0, 0), 2);
+		rectangle(gray_disp, *it, Scalar(255, 255, 255), 1);
 	}
+	putText(dispImg, "Grayscale", Point(5, dispImg.rows - 5), FONT_HERSHEY_COMPLEX_SMALL, 0.6, Scalar(0, 255, 0), 1);
 
 	Rectangles.erase(Rectangles.begin(), Rectangles.end());
 
-	cout << "MSER : " << 1000 * mserExtractor(hsv, Rectangles, ExProps) << "ms";
-	cout << " : " << Rectangles.size() << endl << endl;
+	cout << "HSV MSER       = " << 1000 * mserExtractor(hsv, Rectangles, ExProps) << "ms";
+	cout << " | Regions = " << Rectangles.size() << endl << endl;
 	for (vector<Rect>::iterator it = Rectangles.begin();it != Rectangles.end();it++) {
-		rectangle(dispImg, *it, Scalar(0,0,255), 2);
+		rectangle(dispImg, *it, Scalar(0, 0, 255), 1);
+		rectangle(hsv_disp, *it, Scalar(0, 0, 0), 2);
+		rectangle(hsv_disp, *it, Scalar(255, 255, 255), 1);
 	}
+	putText(dispImg, "BaryCenters", Point(5, dispImg.rows - 15), FONT_HERSHEY_COMPLEX_SMALL, 0.6, Scalar(0, 0, 255), 1);
 
 	imshow(window_name[0], dispImg);
+
+	imshow("HSV", hsv_disp);
+	imshow("Grayscale", gray_disp);
+}
+
+void imgSel(int, void*) {
+	string createFilename(string extension, string baseName, int number, int maxNumber);
+	
+	counter = counter_minus1 + 1;
+	string fname = createFilename(extension, name, counter, range);
+	src = imread(fname);
+	cout << fname << endl;
+	thresholdFunc(NULL, NULL);
 }
 
 double mserExtractor(Mat inputImage, vector<Rect> & Rectangles, ExtractionProperties & props) {
@@ -194,20 +228,22 @@ void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30, int whi
 	if (prevSegmentSize != segmentSize) {
 		for (int i = 0;i < 256;i++) {
 			int extraHue = i % segmentSize;
+			int Hval;
 
 			if (i + segmentSize - extraHue >= 180)
-				lut.at<Vec3b>(i)[0] = 0;//H channel
+				Hval = 0;//H channel
 			else if (extraHue < segmentSize / 2)
-				lut.at<Vec3b>(i)[0] = i - extraHue;//H channel
+				Hval = i - extraHue;//H channel
 			else
-				lut.at<Vec3b>(i)[0] = i - extraHue + segmentSize;//H channel
+				Hval = i - extraHue + segmentSize;//H channel
 
-			if (i < whiteThreshold)
+			lut.at<Vec3b>(i)[0] = Hval;
+			if (i <= whiteThreshold)
 				lut.at<Vec3b>(i)[1] = 0;//S channel
 			else
-				lut.at<Vec3b>(i)[1] = i;//S channel
+				lut.at<Vec3b>(i)[1] = 255;//S channel
 
-			lut.at<Vec3b>(i)[2] = 127;//V channel
+			lut.at<Vec3b>(i)[2] = 255;//V channel
 		}
 		prevSegmentSize = segmentSize;
 	}

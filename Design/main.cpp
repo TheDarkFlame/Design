@@ -6,7 +6,7 @@ using namespace cv;
 int main() {
 	srand((unsigned int)time(NULL));
 	Mat createRandomImage();
-	void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30);
+	void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30, int whiteThreshold = 30);
 	Mat random = createRandomImage(),random_out;
 	HSVsegment(random,random_out);
 	Mat red, green, blue;
@@ -34,22 +34,28 @@ Mat createRandomImage() {
 	return temp;
 }
 
-void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30) {
+void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30, int whiteThreshold = 255) {
 	static int prevSegmentSize = 0;
 	static Mat lut(1, 256, CV_8UC3);
 	if (prevSegmentSize != segmentSize) {
 		for (int i = 0;i < 256;i++) {
 			int extraHue = i % segmentSize;
+			int Hval;
 
 			if (i + segmentSize - extraHue >= 180)
-				lut.at<Vec3b>(i)[0] = 0;//H channel
+				Hval = 0;//H channel
 			else if (extraHue < segmentSize / 2)
-				lut.at<Vec3b>(i)[0] = i - extraHue;//H channel
+				Hval = i - extraHue;//H channel
 			else
-				lut.at<Vec3b>(i)[0] = i - extraHue + segmentSize;//H channel
+				Hval = i - extraHue + segmentSize;//H channel
 
-			lut.at<Vec3b>(i)[1] = i;//S channel
-			lut.at<Vec3b>(i)[2] = i;//V channel
+			lut.at<Vec3b>(i)[0] = Hval;
+			if (i <= whiteThreshold)
+				lut.at<Vec3b>(i)[1] = 0;//S channel
+			else
+				lut.at<Vec3b>(i)[1] = 255;//S channel
+
+			lut.at<Vec3b>(i)[2] = 255;//V channel
 		}
 		prevSegmentSize = segmentSize;
 	}

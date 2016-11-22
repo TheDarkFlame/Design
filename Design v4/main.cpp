@@ -116,6 +116,7 @@ int main(int argc, char** argv) {
 	if (argc == 1) {
 		cout << "you have not entered any arguments" << endl << "displaying help and using argument defaults" << endl;
 		cout << help;
+		system("pause");
 	}
 
 	//initialize extraction properties
@@ -260,11 +261,20 @@ int main(int argc, char** argv) {
 
 		cout << endl << "classifications for each ROI, in format as follows:";
 		cout << endl << "<base imagename> <classification>" << endl;
+		
+		int imagenum = -1;
 		for (vector<imagetuple>::iterator it = responses.begin();it != responses.end();it++) {
+			if (get<2>(*it) != imagenum) {
+				imagenum = get<2>(*it);
+				cout << endl << imagenum << endl;
+			}
 			string prediction;
 			class_list.convert(get<3>(*it),prediction);
 			cout << get<1>(*it) << " " << prediction << endl;
 		}
+
+		cout << endl << "total program runtime is : " << (getTickCount() - tick) / getTickFrequency() << " seconds" << endl;
+
 		if (!ProgFlags.preDetected) {
 
 		//make some sort of visual output
@@ -292,7 +302,6 @@ int main(int argc, char** argv) {
 
 	}
 
-	cout << "total program runtime is : " << (getTickCount() - tick) / getTickFrequency() << " seconds" << endl;
 
 	system("pause");
 	return 0;
@@ -313,9 +322,10 @@ void drawRegions(int trackpos, void* data) {
 			case 2: colour = Scalar(0, 0, 255);
 				break;
 			case 3: colour = Scalar(0, 255, 0);
+				break;
 			default: colour = Scalar(255, 255, 255);
 			}
-			rectangle(dispImage, get<0>(*it), colour);
+			rectangle(dispImage, get<0>(*it), colour,1);
 		}
 	}
 	string temp;
@@ -327,6 +337,7 @@ void drawRegions(int trackpos, void* data) {
 	putText(dispImage, temp, Point(5, dispImage.rows - 25), FONT_HERSHEY_COMPLEX_SMALL, 0.75, Scalar(0, 255, 0));
 	class_list.convert(0, temp);
 	putText(dispImage, temp, Point(5, dispImage.rows - 35), FONT_HERSHEY_COMPLEX_SMALL, 0.75, Scalar(255, 255, 255));
+	resize(dispImage, dispImage, Size(dispImage.cols * 2, dispImage.rows * 2));
 	imshow("Review Window", dispImage);
 }
 
@@ -742,20 +753,22 @@ void HSVsegment(Mat inputImage, Mat & outputImage, int segmentSize = 30, int whi
 	if (prevSegmentSize != segmentSize) {
 		for (int i = 0;i < 256;i++) {
 			int extraHue = i % segmentSize;
+			int Hval;
 
 			if (i + segmentSize - extraHue >= 180)
-				lut.at<Vec3b>(i)[0] = 0;//H channel
+				Hval = 0;//H channel
 			else if (extraHue < segmentSize / 2)
-				lut.at<Vec3b>(i)[0] = i - extraHue;//H channel
+				Hval = i - extraHue;//H channel
 			else
-				lut.at<Vec3b>(i)[0] = i - extraHue + segmentSize;//H channel
+				Hval = i - extraHue + segmentSize;//H channel
 
-			if (i < whiteThreshold)
+			lut.at<Vec3b>(i)[0] = Hval;
+			if (i <= whiteThreshold)
 				lut.at<Vec3b>(i)[1] = 0;//S channel
 			else
-				lut.at<Vec3b>(i)[1] = i;//S channel
+				lut.at<Vec3b>(i)[1] = 255;//S channel
 
-			lut.at<Vec3b>(i)[2] = 127;//V channel
+			lut.at<Vec3b>(i)[2] = 255;//V channel
 		}
 		prevSegmentSize = segmentSize;
 	}
